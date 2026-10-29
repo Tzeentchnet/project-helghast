@@ -53,6 +53,34 @@ game code where it pays off ([roadmap](ROADMAP.md)).
 7. **Running.** The result is `kz3.exe`, a native Windows program. On Linux it runs under Proton, which is where it
    is mostly tested (it has also run natively on Windows 11 and on a Windows 10 test machine); a native Linux build is planned.
 
+## Experimental GPU offloads
+
+The following environment switches are **off by default** and require a build incorporating these patches; setting
+them does not update an installed release. They are experiments, not measured frame-rate improvements:
+
+- `LD_VTX_GPU=1` fetches and decodes eligible RSX vertex attributes in the host GPU's vertex shader. Existing
+  vertex-cache hits still use their cached decoded payloads; fills and verification remain on the CPU. The cache
+  retains tracked-write and full source-byte validation. `LD_VTX_CACHE=0` disables the cache for a GPU-fetch-only
+  comparison, and `LD_VTX_GPU_MB` caps a draw's uploaded source block (default 8 MB). Oversized blocks and unavailable
+  GPU-fetch pipelines use CPU fetch. Diagnostics that require the CPU-decoded payload disable GPU fetch;
+  `[vtx-gpu]` reports routing, fallbacks and cache activity.
+- `LD_WB_GPU_PACK=1` packs eligible batched colour-surface readbacks into guest byte order on the GPU. The CPU still
+  waits for the GPU and copies the packed bytes into guest memory; this does not keep the SPU post-processing chain
+  on the GPU. Pipeline or allocation failures are logged and use CPU packing. `LD_WRITEBACK_BATCH=0` selects the
+  existing per-surface CPU path, and the unsafe no-wait test mode disables GPU packing. The extra GPU buffer and copy
+  can outweigh the saved CPU conversion work.
+
+Compare each switch separately against the default using the same build, scene, input and cache state, including
+guest-frame pacing and CPU/GPU timings. Graphics-oriented SPU jobs, including skinning and post-processing, still run
+as recompiled CPU code; replacing them requires preserving their guest-visible memory and synchronization effects.
+No in-level performance or compatibility result is implied by these switches.
+
+The game-free `tools/smoke/test_gpu_offload_d3d12.sh` builds a Windows executable that compares the shared vertex
+and packing shaders with CPU results on D3D12. It uses adapter 0 by default; `RSX_TEST_ADAPTER=N` selects another
+zero-based adapter, and `RSX_TEST_WARP=1` selects the software device. The existing renderer integration tests can
+assert that the requested path actually submitted work: `KZ3_EXPECT_VTX_GPU=1` for `test_vtx_cache.exe` and
+`KZ3_EXPECT_WB_GPU=1` for `test_wb_batch.exe` (use `0` to assert that the respective path stayed off).
+
 ## Data
 
 The game's 31 GB archive is read in place through a case-insensitive virtual file system (the game's paths are not

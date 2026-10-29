@@ -1,0 +1,557 @@
+diff --git a/libs/video/rsx_live_draw.c b/libs/video/rsx_live_draw.c
+index 2bbabde..3e45f79 100644
+--- a/libs/video/rsx_live_draw.c
++++ b/libs/video/rsx_live_draw.c
+@@ -60,6 +60,7 @@ u32  rsx_live_draw_before_guest_sync(void) { return 0; }
+ void rsx_live_draw_note_spu_read(u32 l, u32 o, u32 n) { (void)l; (void)o; (void)n; }   /* patch 2084 */
+ void rsx_live_draw_debug_writeback_stats(double* t, u32* b, u32* s, u32* w)
+ { if (t) *t = 0; if (b) *b = 0; if (s) *s = 0; if (w) *w = 0; }
++void rsx_live_draw_debug_gpu_offload_stats(u64 o[2]) { o[0] = o[1] = 0; }
+ int  rsx_live_draw_blit(u32 sl, u32 sa, u32 sp, u32 dl, u32 da, u32 dp, u32 w, u32 h)
+ { (void)sl; (void)sa; (void)sp; (void)dl; (void)da; (void)dp; (void)w; (void)h; return 0; }
+ int  rsx_live_draw_resolve_blit(u32 sl, u32 sa, u32 sp, u32 ds, u32 dt, u32 dl, u32 da,
+@@ -10160,6 +10161,7 @@ static struct {
+     ID3D12Resource* lut;       /* upload heap, RSX_VG_LUT_WORDS floats */
+     unsigned long long draws, cpu, why[RSX_VG_REASONS], verts, block_bytes, frames;
+     unsigned long long cache_hits, cache_fills, cache_waits, cache_retries;
++    u64 submitted;
+ } g_vg = { .on = -1 };
+ static int ld_vtx_gpu_on(void)
+ {
+@@ -10182,11 +10184,12 @@ static void ld_vg_frame(void)   /* at each flip */
+     if (++g_vg.frames < 60) return;
+     const double n = (double)g_vg.frames;
+     fprintf(stderr, "[vtx-gpu] frame=%u per-frame: gpu=%.1f cpu=%.1f (no-inputs=%.1f freq-range=%.1f unmapped=%.1f"
+-                    " type=%.1f big=%.1f) cache-hit=%.1f fill=%.1f wait=%.1f retry=%.1f verts=%.0f block=%.1fKB\n",
++                    " type=%.1f big=%.1f pso=%.1f) cache-hit=%.1f fill=%.1f wait=%.1f retry=%.1f verts=%.0f block=%.1fKB\n",
+             g_ld_frames, g_vg.draws / n, g_vg.cpu / n,
+             g_vg.why[RSX_VG_NO_INPUTS] / n, g_vg.why[RSX_VG_DIVIDED] / n, g_vg.why[RSX_VG_UNMAPPED] / n,
+-            g_vg.why[RSX_VG_TYPE] / n, g_vg.why[RSX_VG_BIG] / n, g_vg.cache_hits / n, g_vg.cache_fills / n,
+-            g_vg.cache_waits / n, g_vg.cache_retries / n, g_vg.verts / n, g_vg.block_bytes / n / 1024.0);
++            g_vg.why[RSX_VG_TYPE] / n, g_vg.why[RSX_VG_BIG] / n, g_vg.why[RSX_VG_PSO] / n,
++            g_vg.cache_hits / n, g_vg.cache_fills / n, g_vg.cache_waits / n, g_vg.cache_retries / n,
++            g_vg.verts / n, g_vg.block_bytes / n / 1024.0);
+     g_vg.draws = g_vg.cpu = g_vg.verts = g_vg.block_bytes = g_vg.frames = 0;
+     g_vg.cache_hits = g_vg.cache_fills = g_vg.cache_waits = g_vg.cache_retries = 0;
+     memset(g_vg.why, 0, sizeof g_vg.why);
+@@ -10253,6 +10256,13 @@ static int reserve_compact_vertices(u64 bytes)
+     return 1;
+ }
+ 
++static int ld_fetch_compact_cpu(const rsx_vertex_layout_plan* layout)
++{
++    const u64 required = (u64)dc.n_refs * layout->stride;
++    return reserve_compact_vertices(required) &&
++           rsx_vg_cpu_fetch(&dc.fetch_plan, dc.refs, dc.n_refs, dc.compact_verts, ld_vtx_batch_on());
++}
++
+ static int reserve_legacy_vertices(u32 count)
+ {
+     if (count <= dc.cap_verts)
+@@ -10521,7 +10531,8 @@ static void fetch_batches_hoisted(
+             g_ld_divider_fetches += dc.n_refs;
+     }
+     if (packed_payload && gpu_allowed) {
+-        const int why = rsx_vg_plan(&dc.fetch_plan, dc.refs, dc.n_refs, g_vg.max_block, &dc.vg_d);
++        const u32 block_limit = rsx_vg_ring_block_limit(g_vg.max_block, dc.n_refs, VERT_BUFFER_SIZE);
++        const int why = rsx_vg_plan(&dc.fetch_plan, dc.refs, dc.n_refs, block_limit, &dc.vg_d);
+         if (why == RSX_VG_OK && reserve_compact_vertices((u64)dc.n_refs * sizeof(*dc.refs))) {
+             memcpy(dc.compact_verts, dc.refs, (size_t)dc.n_refs * sizeof(*dc.refs));
+             dc.vg = 1;
+@@ -10538,27 +10549,10 @@ static void fetch_batches_hoisted(
+         g_vg.cpu++; g_vg.why[why == RSX_VG_OK ? RSX_VG_BIG : why]++;
+     }
+     if (packed_payload) {
+-        const u64 required = (u64)dc.n_refs * layout->stride;
+-        if (!reserve_compact_vertices(required)) {
++        if (!ld_fetch_compact_cpu(layout)) {
+             dc.fetch_ok = 0;
+             return;
+         }
+-        if (ld_vtx_batch_on() && layout->stride) {   /* KZ3 patch 2040 */
+-            if (!rsx_vertex_fetch_many(
+-                    &dc.fetch_plan, dc.refs, dc.n_refs, dc.compact_verts)) {
+-                dc.fetch_ok = 0;
+-                return;
+-            }
+-        } else
+-        for (u32 i = 0; i < dc.n_refs; i++) {
+-            u8* destination = layout->stride
+-                ? dc.compact_verts + (u64)i * layout->stride : NULL;
+-            if (!rsx_vertex_fetch_one(
+-                    &dc.fetch_plan, &dc.refs[i], destination)) {
+-                dc.fetch_ok = 0;
+-                return;
+-            }
+-        }
+     } else {
+         /*
+          * H and M deliberately retain the complete legacy payload.  With an
+@@ -13488,6 +13482,17 @@ static int ld_h169_log_on(void)
+     return on;
+ }
+ 
++static void ld_recycle_draw_rings(void)
++{
++    ld_flush(LD_FLUSH_VERTEX_RING);
++    g.vb_used = 0;
++    g.ib_used = 0;
++    g.cb_used = 0;
++    g.ps_cb_used = 0;
++    g.srv_ring_used = 0; g_srv_desc_gen++;
++    g.smp_ring_used = 0;
++}
++
+ static void sink_end_impl(void* user, const rsx_dispatch* r)
+ {
+     (void)user; (void)r;
+@@ -13604,16 +13609,16 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
+ 
+     if (!vc_hit) live_a010_geom_trace(prim, n_tri);   /* patch 2047: a hit has no CPU-side payload */
+ 
+-    const u32 vertex_stride = dc.vg ? (u32)sizeof(rsx_vertex_ref) :
++    u32 vertex_stride = dc.vg ? (u32)sizeof(rsx_vertex_ref) :
+         ld_vertex_compact_payload() ? used_layout.stride : VERT_STRIDE;
+     const u32 uploaded_vertices = indexed ? dc.n_verts : n_tri;
+     const int vd_hit = vc_hit && vc_hit->dev_len;   /* patch 2092: the payload and indices are in the device cache */
+     const void* vertex_data = vc_hit ? (const void*)vc_hit->data : ld_vertex_compact_payload()
+         ? (const void*)dc.compact_verts : (const void*)dc.verts;
+-    const u64 draw_payload_bytes = (u64)uploaded_vertices * vertex_stride;
++    u64 draw_payload_bytes = (u64)uploaded_vertices * vertex_stride;
+     /* patch 2076: the draw's block follows the payload at the next 256-byte offset of the ring (the ring offset
+      * stays 4-aligned: payload 4 n, padding <= 252, block a multiple of 16; 256 + block bounds it) */
+-    const u64 draw_vb_bytes = draw_payload_bytes + (dc.vg ? 256u + (u64)dc.vg_d.block_bytes : 0u);
++    u64 draw_vb_bytes = draw_payload_bytes + (dc.vg ? 256u + (u64)dc.vg_d.block_bytes : 0u);
+     const u64 draw_ib_bytes = indexed ? (u64)n_tri * sizeof(u32) : 0;
+     const u64 vb_capacity = VERT_BUFFER_SIZE;
+     if (draw_vb_bytes > vb_capacity || draw_ib_bytes > INDEX_BUFFER_SIZE) {
+@@ -13632,13 +13637,56 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
+          * 256K-vertex ring.  We are still before this draw's memcpy, so it is
+          * safe to submit/wait and reuse every transient draw ring here.
+          */
+-        ld_flush(LD_FLUSH_VERTEX_RING);
+-        g.vb_used = 0;
+-        g.ib_used = 0;
+-        g.cb_used = 0;
+-        g.ps_cb_used = 0;
+-        g.srv_ring_used = 0; g_srv_desc_gen++;   /* patch 2045: the memo's bases are reused */
+-        g.smp_ring_used = 0;
++        ld_recycle_draw_rings();
++    }
++    ID3D12PipelineState* vg_pso = NULL;
++    if (dc.vg) {
++        LDW_T0(vg_pso_t0);
++        vg_pso = get_pso(ld_vertex_mask_signature() ? &used_layout : NULL, 2);
++        LDW_ADD(RSX_PERF_W_PSO_T, vg_pso_t0);
++        static u32 vg_ok, vg_fail;
++        if (vg_pso) vg_ok++;
++        else {
++            vg_fail++;
++            if (vg_fail <= 8u || !(vg_fail & (vg_fail - 1u)))
++                fprintf(stderr, "[vtx-gpu] GPU-fetch pipeline unavailable; using CPU fetch (failures=%u)\n", vg_fail);
++            if (vg_fail == 16u && !vg_ok) {
++                fprintf(stderr, "[vtx-gpu] 16 GPU-fetch pipelines failed, none built: off (CPU fetch from here)\n");
++                g_vg.on = 0;
++            }
++            LDW_T0(vg_cpu_t0);
++#if defined(YZ_PERF_PROFILE)
++            const LONGLONG vg_cpu_begin = ld_profile_qpc();
++#endif
++            if (!ld_fetch_compact_cpu(&used_layout)) {
++                fprintf(stderr, "[vtx-gpu] CPU fallback fetch failed\n");
++                g_ld_stats.group_drop_fetch++;
++                return;
++            }
++#if defined(YZ_PERF_PROFILE)
++            g_ld_profile.total.vertex_fetch_pack_qpc += (u64)(ld_profile_qpc() - vg_cpu_begin);
++#endif
++            LDW_ADD(RSX_PERF_W_VTX_T, vg_cpu_t0);
++            LDW_ADD(RSX_PERF_W_VTX_FETCH_T, vg_cpu_t0);
++            if (vg_cpu_t0)
++                rsx_perf_add(RSX_PERF_W_VTX_BYTES, (long long)dc.n_refs * used_layout.stride -
++                             (long long)dc.n_refs * (long long)sizeof(*dc.refs) - dc.vg_d.block_bytes);
++            dc.vg = 0;
++            g_vg.draws--; g_vg.verts -= dc.n_refs; g_vg.block_bytes -= dc.vg_d.block_bytes;
++            g_vg.cpu++; g_vg.why[RSX_VG_PSO]++;
++            vertex_stride = used_layout.stride;
++            vertex_data = dc.compact_verts;
++            draw_payload_bytes = (u64)uploaded_vertices * vertex_stride;
++            draw_vb_bytes = draw_payload_bytes;
++            if (draw_vb_bytes > vb_capacity) {
++                live_draw_csv_emit(prim, n_tri, "drop_vbring_oversize");
++                g_ld_stats.group_drop_ring++;
++                return;
++            }
++            if ((u64)g.vb_used + draw_vb_bytes > vb_capacity ||
++                (u64)g.ib_used + draw_ib_bytes > INDEX_BUFFER_SIZE)
++                ld_recycle_draw_rings();
++        }
+     }
+     LDW_T0(vcopy_t0);
+     if (vc_fill && !vc_hit) g_vc_st.miss_bytes += draw_vb_bytes + draw_ib_bytes;   /* patch 2092 */
+@@ -13680,18 +13728,10 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
+     LDW_ADD(RSX_PERF_W_VTX_COPY_T, vcopy_t0);   /* patch 2033 */
+ 
+     LDW_T0(pso_t0);
+-    ID3D12PipelineState* pso = get_pso(
++    ID3D12PipelineState* pso = vg_pso ? vg_pso : get_pso(
+         ld_vertex_mask_signature() ? &used_layout : NULL,
+         ld_vertex_compact_payload() ? (dc.vg ? 2 : 1) : 0);   /* patch 2076: 2 = GPU fetch variant */
+     LDW_ADD(RSX_PERF_W_PSO_T, pso_t0);
+-    if (dc.vg) {   /* patch 2076: the shader compiler must take the GPU-fetch vertex shaders, or the mode goes off */
+-        static u32 vg_ok, vg_fail;
+-        if (pso) vg_ok++;
+-        else if (++vg_fail == 16u && !vg_ok) {
+-            fprintf(stderr, "[vtx-gpu] 16 GPU-fetch pipelines failed, none built: off (CPU fetch from here)\n");
+-            g_vg.on = 0;
+-        }
+-    }
+     if (!pso) {
+ #if defined(YZ_PERF_PROFILE)
+         ld_profile_note_rejected_pso();
+@@ -14616,6 +14656,7 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
+     } else {
+         g.list->lpVtbl->DrawInstanced(g.list, n_tri, 1, 0, 0);
+     }
++    if (oq_pred >= 0 && dc.vg) g_vg.submitted++;
+     ld_oq_after_draw(oq_pred);
+     if (g_gt.on > 0) ld_gt_draw(target, n_mrt, mrt, current_zslot, n_tri, sf.clip_w * sf.clip_h, (u32)__builtin_popcount(texture_mask));   /* patch 2052 */
+     LDW_ADD(RSX_PERF_W_D_REC_T, rec_t0);
+@@ -16623,10 +16664,145 @@ static int ld_writeback_surface(u32 i, u32 for_off, u32 for_size)
+  * submits once, waits once, then converts all of them into guest memory.
+  * LD_WRITEBACK_BATCH=0 selects the per-surface path (A/B). */
+ #define LD_RB_SLOTS 16
++#include "rsx_wb_gpu.h"
+ static ID3D12Resource* g_ld_rb[LD_RB_SLOTS];
+ static u64 g_ld_rb_bytes[LD_RB_SLOTS];
++static ID3D12Resource* g_ld_wb_gpu_buf[LD_RB_SLOTS];
++static u64 g_ld_wb_gpu_bytes[LD_RB_SLOTS];
++static u8 g_ld_rb_packed[LD_RB_SLOTS];
++static ID3D12RootSignature* g_ld_wb_gpu_root;
++static ID3D12PipelineState* g_ld_wb_gpu_pso;
++static int g_ld_wb_gpu_tried;
++static u64 g_ld_wb_gpu_dispatches;
+ static struct { u64 qpc; u32 syncs, surfaces, waits; } g_ld_wb;
+ 
++/* LD_WB_GPU_PACK=1 (default 0) packs batched readbacks on the GPU. The guest still waits and receives every byte. */
++static int ld_wb_gpu_enabled(void)
++{
++    static int enabled = -1;
++    if (enabled < 0) {
++        const char* e = getenv("LD_WB_GPU_PACK");
++        const char* unsafe = getenv("LD_WB_UNSAFE_NOWAIT");
++        enabled = e && !strcmp(e, "1");
++        if (e && *e && strcmp(e, "0") && strcmp(e, "1"))
++            fprintf(stderr, "[wb-gpu-pack] invalid LD_WB_GPU_PACK=%s (expected 0 or 1); disabled\n", e);
++        if (enabled && unsafe && atoi(unsafe)) {
++            fprintf(stderr, "[wb-gpu-pack] disabled with LD_WB_UNSAFE_NOWAIT\n");
++            enabled = 0;
++        }
++        if (enabled) fprintf(stderr, "[wb-gpu-pack] enabled for batched readbacks\n");
++    }
++    return enabled;
++}
++
++static int ld_wb_gpu_pipeline(void)
++{
++    if (g_ld_wb_gpu_pso) return 1;
++    if (g_ld_wb_gpu_tried) return 0;
++    g_ld_wb_gpu_tried = 1;
++    static const char source[] = RSX_WB_GPU_HLSL;
++    ID3DBlob *cs = NULL, *sig = NULL, *err = NULL;
++    const char* stage = "shader";
++    HRESULT hr = D3DCompile(source, sizeof source - 1u, "writeback_pack", NULL, NULL, "main", "cs_5_0",
++                            D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &cs, &err);
++    if (FAILED(hr) || !cs) { if (SUCCEEDED(hr)) hr = E_FAIL; goto fail; }
++    if (err) { err->lpVtbl->Release(err); err = NULL; }
++    D3D12_ROOT_PARAMETER rp[2] = {0};
++    rp[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
++    rp[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
++    rp[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
++    rp[1].Constants.Num32BitValues = 4;
++    rp[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
++    D3D12_ROOT_SIGNATURE_DESC rd = {0};
++    rd.NumParameters = 2; rd.pParameters = rp;
++    stage = "root signature serialization";
++    hr = D3D12SerializeRootSignature(&rd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err);
++    if (FAILED(hr) || !sig) { if (SUCCEEDED(hr)) hr = E_FAIL; goto fail; }
++    if (err) { err->lpVtbl->Release(err); err = NULL; }
++    stage = "root signature";
++    hr = g.dev->lpVtbl->CreateRootSignature(g.dev, 0, sig->lpVtbl->GetBufferPointer(sig),
++                                            sig->lpVtbl->GetBufferSize(sig),
++                                            &IID_ID3D12RootSignature, (void**)&g_ld_wb_gpu_root);
++    if (FAILED(hr) || !g_ld_wb_gpu_root) { if (SUCCEEDED(hr)) hr = E_FAIL; goto fail; }
++    D3D12_COMPUTE_PIPELINE_STATE_DESC pd = {0};
++    pd.pRootSignature = g_ld_wb_gpu_root;
++    pd.CS.pShaderBytecode = cs->lpVtbl->GetBufferPointer(cs);
++    pd.CS.BytecodeLength = cs->lpVtbl->GetBufferSize(cs);
++    stage = "pipeline";
++    hr = g.dev->lpVtbl->CreateComputePipelineState(g.dev, &pd, &IID_ID3D12PipelineState,
++                                                   (void**)&g_ld_wb_gpu_pso);
++    if (FAILED(hr) || !g_ld_wb_gpu_pso) { if (SUCCEEDED(hr)) hr = E_FAIL; goto fail; }
++    sig->lpVtbl->Release(sig);
++    cs->lpVtbl->Release(cs);
++    return 1;
++fail:
++    fprintf(stderr, "[wb-gpu-pack] %s failed hr=0x%08lX: %s; using CPU conversion\n", stage, (unsigned long)hr,
++            err ? (const char*)err->lpVtbl->GetBufferPointer(err) : "<no diagnostics>");
++    if (err) err->lpVtbl->Release(err);
++    if (sig) sig->lpVtbl->Release(sig);
++    if (cs) cs->lpVtbl->Release(cs);
++    if (g_ld_wb_gpu_pso) { g_ld_wb_gpu_pso->lpVtbl->Release(g_ld_wb_gpu_pso); g_ld_wb_gpu_pso = NULL; }
++    if (g_ld_wb_gpu_root) { g_ld_wb_gpu_root->lpVtbl->Release(g_ld_wb_gpu_root); g_ld_wb_gpu_root = NULL; }
++    return 0;
++}
++
++static int ld_wb_gpu_buffer(u32 k, u64 need)
++{
++    if (!need || need > 0x100000000ull) {
++        static u32 invalid_sizes;
++        if (++invalid_sizes <= 8u || !(invalid_sizes & (invalid_sizes - 1u)))
++            fprintf(stderr, "[wb-gpu-pack] unsupported buffer size=%llu; using CPU conversion\n",
++                    (unsigned long long)need);
++        return 0;
++    }
++    if (!ld_wb_gpu_pipeline()) return 0;
++    if (g_ld_wb_gpu_bytes[k] >= need) return 1;
++    if (g_ld_wb_gpu_buf[k]) {
++        g_ld_wb_gpu_buf[k]->lpVtbl->Release(g_ld_wb_gpu_buf[k]);
++        g_ld_wb_gpu_buf[k] = NULL; g_ld_wb_gpu_bytes[k] = 0;
++    }
++    const u64 bytes = (need + 0xFFFFFull) & ~0xFFFFFull;
++    D3D12_HEAP_PROPERTIES hp = {0}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
++    D3D12_RESOURCE_DESC bd = {0};
++    bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; bd.Width = bytes;
++    bd.Height = 1; bd.DepthOrArraySize = 1; bd.MipLevels = 1;
++    bd.Format = DXGI_FORMAT_UNKNOWN; bd.SampleDesc.Count = 1;
++    bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
++    bd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
++    HRESULT hr = g.dev->lpVtbl->CreateCommittedResource(g.dev, &hp, D3D12_HEAP_FLAG_NONE, &bd,
++        D3D12_RESOURCE_STATE_COPY_DEST, NULL, &IID_ID3D12Resource, (void**)&g_ld_wb_gpu_buf[k]);
++    if (FAILED(hr) || !g_ld_wb_gpu_buf[k]) {
++        if (SUCCEEDED(hr)) hr = E_FAIL;
++        static u32 failures;
++        if (++failures <= 8u || !(failures & (failures - 1u)))
++            fprintf(stderr, "[wb-gpu-pack] buffer allocation failed hr=0x%08lX bytes=%llu; using CPU conversion\n",
++                    (unsigned long)hr, (unsigned long long)bytes);
++        g_ld_wb_gpu_buf[k] = NULL;
++        return 0;
++    }
++    if (!g_ld_wb_gpu_buf[k]->lpVtbl->GetGPUVirtualAddress(g_ld_wb_gpu_buf[k])) {
++        fprintf(stderr, "[wb-gpu-pack] buffer has no GPU address; using CPU conversion\n");
++        g_ld_wb_gpu_buf[k]->lpVtbl->Release(g_ld_wb_gpu_buf[k]);
++        g_ld_wb_gpu_buf[k] = NULL;
++        return 0;
++    }
++    g_ld_wb_gpu_bytes[k] = bytes;
++    return 1;
++}
++
++static void ld_wb_gpu_shutdown(void)
++{
++    for (u32 k = 0; k < LD_RB_SLOTS; k++) {
++        if (g_ld_wb_gpu_buf[k]) g_ld_wb_gpu_buf[k]->lpVtbl->Release(g_ld_wb_gpu_buf[k]);
++        if (g_ld_rb[k]) g_ld_rb[k]->lpVtbl->Release(g_ld_rb[k]);
++        g_ld_wb_gpu_buf[k] = NULL; g_ld_wb_gpu_bytes[k] = 0;
++        g_ld_rb[k] = NULL; g_ld_rb_bytes[k] = 0; g_ld_rb_packed[k] = 0;
++    }
++    if (g_ld_wb_gpu_pso) g_ld_wb_gpu_pso->lpVtbl->Release(g_ld_wb_gpu_pso);
++    if (g_ld_wb_gpu_root) g_ld_wb_gpu_root->lpVtbl->Release(g_ld_wb_gpu_root);
++    g_ld_wb_gpu_pso = NULL; g_ld_wb_gpu_root = NULL; g_ld_wb_gpu_tried = 0;
++}
++
+ static int ld_wb_batch_enabled(void)
+ {
+     static int en = -1;
+@@ -16643,6 +16819,7 @@ static int ld_rb_record(u32 i, u32 k)
+     const u32 texel = sf->fmt == DXGI_FORMAT_R16G16B16A16_FLOAT ? 8u : 4u;
+     const u32 pitch = (sf->w * texel + 255u) & ~255u;
+     const u64 need = (u64)pitch * sf->h;
++    g_ld_rb_packed[k] = 0;
+     if (g_ld_rb_bytes[k] < need) {
+         if (g_ld_rb[k]) { g_ld_rb[k]->lpVtbl->Release(g_ld_rb[k]); g_ld_rb[k] = NULL; g_ld_rb_bytes[k] = 0; }
+         const u64 bytes = (need + 0xFFFFFull) & ~0xFFFFFull;
+@@ -16657,6 +16834,7 @@ static int ld_rb_record(u32 i, u32 k)
+             { g_ld_rb[k] = NULL; return 0; }
+         g_ld_rb_bytes[k] = bytes;
+     }
++    const int gpu_pack = ld_wb_gpu_enabled() && sf->w && sf->h && ld_wb_gpu_buffer(k, need);
+     D3D12_RESOURCE_BARRIER b = {0};
+     b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+     b.Transition.pResource = sf->tex;
+@@ -16666,7 +16844,8 @@ static int ld_rb_record(u32 i, u32 k)
+     g.list->lpVtbl->ResourceBarrier(g.list, 1, &b);
+     D3D12_TEXTURE_COPY_LOCATION src = {0}, dst = {0};
+     src.pResource = sf->tex; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+-    dst.pResource = g_ld_rb[k]; dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
++    dst.pResource = gpu_pack ? g_ld_wb_gpu_buf[k] : g_ld_rb[k];
++    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+     dst.PlacedFootprint.Footprint.Format = sf->fmt;
+     dst.PlacedFootprint.Footprint.Width = sf->w;
+     dst.PlacedFootprint.Footprint.Height = sf->h;
+@@ -16676,6 +16855,31 @@ static int ld_rb_record(u32 i, u32 k)
+     b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+     b.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+     g.list->lpVtbl->ResourceBarrier(g.list, 1, &b);
++    if (gpu_pack) {
++        b.Transition.pResource = g_ld_wb_gpu_buf[k];
++        b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
++        b.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
++        g.list->lpVtbl->ResourceBarrier(g.list, 1, &b);
++        g.list->lpVtbl->SetPipelineState(g.list, g_ld_wb_gpu_pso); LD_SM_INVALIDATE();
++        g.list->lpVtbl->SetComputeRootSignature(g.list, g_ld_wb_gpu_root);
++        g.list->lpVtbl->SetComputeRootUnorderedAccessView(
++            g.list, 0, g_ld_wb_gpu_buf[k]->lpVtbl->GetGPUVirtualAddress(g_ld_wb_gpu_buf[k]));
++        const u32 words = sf->w * (texel / 4u);
++        const u32 mode = sf->fmt == DXGI_FORMAT_R8G8B8A8_UNORM ? RSX_WB_GPU_RGBA8
++                       : texel == 8u ? RSX_WB_GPU_HALF : RSX_WB_GPU_FLOAT;
++        const u32 constants[4] = { words, sf->h, pitch, mode };
++        g.list->lpVtbl->SetComputeRoot32BitConstants(g.list, 1, 4, constants, 0);
++        g.list->lpVtbl->Dispatch(g.list, (words + 7u) / 8u, (sf->h + 7u) / 8u, 1);
++        g_ld_wb_gpu_dispatches++;
++        b.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
++        b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
++        g.list->lpVtbl->ResourceBarrier(g.list, 1, &b);
++        g.list->lpVtbl->CopyBufferRegion(g.list, g_ld_rb[k], 0, g_ld_wb_gpu_buf[k], 0, need);
++        b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
++        b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
++        g.list->lpVtbl->ResourceBarrier(g.list, 1, &b);
++        g_ld_rb_packed[k] = 1;
++    }
+     return 1;
+ }
+ 
+@@ -16695,7 +16899,9 @@ static int ld_rb_store(u32 i, u32 k, u32 for_off, u32 for_size)
+     for (u32 y = 0; y < sf->h; y++) {
+         const u8* sp = px + (size_t)y * pitch;
+         u8* dp = gm + (size_t)y * gp;
+-        if (sf->fmt == DXGI_FORMAT_R8G8B8A8_UNORM) {               /* host R,G,B,A -> guest A,R,G,B */
++        if (g_ld_rb_packed[k]) {
++            memcpy(dp, sp, (size_t)sf->w * texel);
++        } else if (sf->fmt == DXGI_FORMAT_R8G8B8A8_UNORM) {        /* host R,G,B,A -> guest A,R,G,B */
+             for (u32 x = 0; x < sf->w; x++, sp += 4, dp += 4) {
+                 dp[0] = sp[3]; dp[1] = sp[0]; dp[2] = sp[1]; dp[3] = sp[2];
+             }
+@@ -16819,6 +17025,12 @@ void rsx_live_draw_debug_writeback_stats(double* us_total, u32* batches, u32* su
+     if (gpu_waits) *gpu_waits = g_ld_wb.waits;
+ }
+ 
++void rsx_live_draw_debug_gpu_offload_stats(u64 out[2])
++{
++    out[0] = g_vg.submitted;
++    out[1] = g_ld_wb_gpu_dispatches;
++}
++
+ /* Patch 2023 (ENHANCEMENT): host anti-aliasing pass. Killzone 3 anti-aliases
+  * with MLAA on the SPUs (post job 0x26 with a hardcoded 1280-pixel pitch, run
+  * in place on the NV0039 copy of the scene in main memory). When the port
+@@ -18558,6 +18770,7 @@ void rsx_live_draw_shutdown(void)
+     /* let the GPU drain, then release. (Best-effort; process teardown also
+      * reclaims.) */
+     ld_flush(LD_FLUSH_SHUTDOWN);
++    ld_wb_gpu_shutdown();
+ #if defined(YZ_PERF_PROFILE)
+     fprintf(stderr,
+             "[rsx-perf-summary] frames=%u "
+diff --git a/libs/video/rsx_live_draw.h b/libs/video/rsx_live_draw.h
+index 8607666..2b0e198 100644
+--- a/libs/video/rsx_live_draw.h
++++ b/libs/video/rsx_live_draw.h
+@@ -117,6 +117,8 @@ u32  rsx_live_draw_writeback_range(u32 location, u32 offset, u32 size);
+  * LD_WRITEBACK_BATCH=0 = one wait per surface). Totals since start: wall time
+  * in microseconds, batches (calls), surfaces written, GPU waits. */
+ void rsx_live_draw_debug_writeback_stats(double* us_total, u32* batches, u32* surfaces, u32* gpu_waits);
++/* Submitted GPU vertex-fetch draws and writeback-packing dispatches, respectively. */
++void rsx_live_draw_debug_gpu_offload_stats(u64 out[2]);
+ /* Patch 2023 (ENHANCEMENT): host anti-aliasing (FXAA, one compute pass) on a
+  * frame-sized A8R8G8B8 colour surface right before an NV0039 copy of the
+  * whole surface writes it back (Killzone 3: the scene leaving for the SPU post
+diff --git a/libs/video/rsx_vtx_gpu.h b/libs/video/rsx_vtx_gpu.h
+index 94ee6ee..1e4ba8c 100644
+--- a/libs/video/rsx_vtx_gpu.h
++++ b/libs/video/rsx_vtx_gpu.h
+@@ -126,7 +126,8 @@ typedef struct rsx_vg_draw {
+ } rsx_vg_draw;
+ 
+ /* Why a draw stays on the CPU path ([vtx-gpu] log columns). */
+-enum { RSX_VG_OK = 0, RSX_VG_NO_INPUTS, RSX_VG_DIVIDED, RSX_VG_UNMAPPED, RSX_VG_TYPE, RSX_VG_BIG, RSX_VG_REASONS };
++enum { RSX_VG_OK = 0, RSX_VG_NO_INPUTS, RSX_VG_DIVIDED, RSX_VG_UNMAPPED, RSX_VG_TYPE, RSX_VG_BIG,
++       RSX_VG_PSO, RSX_VG_REASONS };
+ 
+ enum { RSX_VG_ROUTE_CPU, RSX_VG_ROUTE_GPU, RSX_VG_ROUTE_CACHE, RSX_VG_ROUTE_FILL };
+ #define RSX_VG_CACHE_RETRY_FRAMES 60u
+@@ -144,6 +145,25 @@ static inline int rsx_vg_cache_wait(u32 frame, u32 retry_frame)
+     return remaining != 0u && remaining <= RSX_VG_CACHE_RETRY_FRAMES;
+ }
+ 
++static inline u32 rsx_vg_ring_block_limit(u32 requested, u32 count, u32 ring_bytes)
++{
++    const u64 payload = (u64)count * sizeof(rsx_vertex_ref) + 256u;
++    if (payload >= ring_bytes) return 0u;
++    const u64 available = ring_bytes - payload;
++    return available < requested ? (u32)available : requested;
++}
++
++static inline int rsx_vg_cpu_fetch(const rsx_vertex_fetch_plan* p, const rsx_vertex_ref* refs, u32 count,
++                                   u8* dst, int batch)
++{
++    if (batch && p->layout.stride) return rsx_vertex_fetch_many(p, refs, count, dst);
++    for (u32 i = 0; i < count; i++) {
++        u8* out = p->layout.stride ? dst + (u64)i * p->layout.stride : NULL;
++        if (!rsx_vertex_fetch_one(p, &refs[i], out)) return 0;
++    }
++    return 1;
++}
++
+ static inline u32 rsx_vg_format(const rsx_vertex_fetch_plan* p, u32 attr)
+ {
+     const rsx_vertex_fetch_attr* f = &p->attr[attr];
+diff --git a/libs/video/rsx_wb_gpu.h b/libs/video/rsx_wb_gpu.h
+new file mode 100644
+index 0000000..3ba6f8a
+--- /dev/null
++++ b/libs/video/rsx_wb_gpu.h
+@@ -0,0 +1,43 @@
++/*
++ * Integer-only packing for batched surface readback. The GPU operates on
++ * the raw copied bytes, so float and half-float payloads are never converted.
++ */
++#ifndef PS3RECOMP_RSX_WB_GPU_H
++#define PS3RECOMP_RSX_WB_GPU_H
++
++#include <stdint.h>
++
++enum { RSX_WB_GPU_RGBA8, RSX_WB_GPU_HALF, RSX_WB_GPU_FLOAT };
++
++#define RSX_WB_GPU_CODE(...) __VA_ARGS__
++#define RSX_WB_GPU_TEXT(...) #__VA_ARGS__
++#define RSX_WB_GPU_WORD(X) X( \
++WB_FN uint rsx_wb_gpu_word(uint v, uint mode) { \
++    if (mode == 0u) return (v << 8u) | (v >> 24u); \
++    if (mode == 1u) return ((v & 0x00FF00FFu) << 8u) | ((v & 0xFF00FF00u) >> 8u); \
++    return (v >> 24u) | ((v >> 8u) & 0x0000FF00u) | ((v << 8u) & 0x00FF0000u) | (v << 24u); \
++} )
++
++#ifdef RSX_WB_GPU_C_REFERENCE
++typedef uint32_t rsx_wb_gpu_uint;
++#define uint rsx_wb_gpu_uint
++#define WB_FN static inline
++RSX_WB_GPU_WORD(RSX_WB_GPU_CODE)
++#undef WB_FN
++#undef uint
++#endif
++
++#define RSX_WB_GPU_HLSL \
++    "RWByteAddressBuffer wb : register(u0);\n" \
++    "cbuffer WBConstants : register(b0) { uint wb_words; uint wb_rows; uint wb_pitch; uint wb_mode; };\n" \
++    "#define WB_FN\n" \
++    RSX_WB_GPU_WORD(RSX_WB_GPU_TEXT) "\n" \
++    "[numthreads(8, 8, 1)]\n" \
++    "void main(uint3 id : SV_DispatchThreadID) {\n" \
++    "    if (id.x < wb_words && id.y < wb_rows) {\n" \
++    "        uint off = id.y * wb_pitch + id.x * 4u;\n" \
++    "        wb.Store(off, rsx_wb_gpu_word(wb.Load(off), wb_mode));\n" \
++    "    }\n" \
++    "}\n"
++
++#endif /* PS3RECOMP_RSX_WB_GPU_H */

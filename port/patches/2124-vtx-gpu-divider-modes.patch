@@ -1,0 +1,234 @@
+diff --git a/libs/video/rsx_live_draw.c b/libs/video/rsx_live_draw.c
+index 50cd045..b17f4a6 100644
+--- a/libs/video/rsx_live_draw.c
++++ b/libs/video/rsx_live_draw.c
+@@ -8020,8 +8020,8 @@ static void ld_pso_desc_fill(D3D12_GRAPHICS_PIPELINE_STATE_DESC* pd, D3D12_INPUT
+                              ID3DBlob* vs, ID3DBlob* ps, const render_state_t* rs,
+                              u32 input_count, const u8* attrs, int masked, int packed_offsets, int has_depth)
+ {
+-    if (masked && packed_offsets == 2) {   /* patch 2076: GPU fetch, the element index only */
+-        const D3D12_INPUT_ELEMENT_DESC e = { "VGIDX", 0, DXGI_FORMAT_R32_UINT, 0, 0,
++    if (masked && packed_offsets == 2) {   /* GPU fetch: vertex ID and base index */
++        const D3D12_INPUT_ELEMENT_DESC e = { "VGIDX", 0, DXGI_FORMAT_R32G32_UINT, 0, 0,
+                                              D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 };
+         il[0] = e;
+         input_count = 1;
+@@ -10139,7 +10139,7 @@ typedef struct {
+      * the n_verts position at each one and the STRIP/FAN expansion must
+      * not bridge across a cut. */
+     u32*    cuts; u32 n_cuts, cap_cuts;
+-    int vg;              /* patch 2076: this draw's vertices are fetched on the GPU (payload = u32 element) */
++    int vg;              /* GPU fetch uses one rsx_vertex_ref per vertex */
+     rsx_vg_draw vg_d;    /* patch 2076: its table and raw spans */
+ } draw_ctx;
+ 
+@@ -10147,7 +10147,7 @@ static draw_ctx dc;
+ 
+ /* ---------------------------------------------------------------------------
+  * KZ3 patch 2076: GPU-side vertex fetch (LD_VTX_GPU=1, default off; rsx_vtx_gpu.h). A covered draw uploads the raw
+- * guest bytes its attributes span plus a 512-byte table and one u32 per unique vertex; the vertex shader decodes
++ * guest bytes its attributes span plus a 512-byte table and one rsx_vertex_ref per unique vertex; the vertex shader decodes
+  * (t20 = the draw's block, t21 = the decode table). Other draws keep the CPU fetch; [vtx-gpu] gives both counts
+  * and the reasons per frame (mean over the last 60 frames). LD_VTX_GPU_MB caps one draw's block (default 8 MB).
+  * -----------------------------------------------------------------------*/
+@@ -10515,10 +10515,9 @@ static void fetch_batches_hoisted(
+             g_ld_divider_fetches += dc.n_refs;
+     }
+     if (packed_payload && ld_vtx_gpu_on()) {   /* patch 2076 */
+-        const int why = rsx_vg_plan(&dc.fetch_plan, g_vg.max_block, &dc.vg_d);
+-        if (why == RSX_VG_OK && reserve_compact_vertices((u64)dc.n_refs * 4u)) {
+-            u32* out = (u32*)dc.compact_verts;
+-            for (u32 i = 0; i < dc.n_refs; i++) out[i] = rsx_vg_element(&dc.refs[i]);
++        const int why = rsx_vg_plan(&dc.fetch_plan, dc.refs, dc.n_refs, g_vg.max_block, &dc.vg_d);
++        if (why == RSX_VG_OK && reserve_compact_vertices((u64)dc.n_refs * sizeof(*dc.refs))) {
++            memcpy(dc.compact_verts, dc.refs, (size_t)dc.n_refs * sizeof(*dc.refs));
+             dc.vg = 1;
+             g_vg.draws++; g_vg.verts += dc.n_refs; g_vg.block_bytes += dc.vg_d.block_bytes;
+             dc.n_verts = dc.n_refs;
+@@ -10526,7 +10525,7 @@ static void fetch_batches_hoisted(
+                 LDW_ADD(RSX_PERF_W_VTX_FETCH_T, fetch_t0);
+                 rsx_perf_add(RSX_PERF_W_VTX_REF_N, dc.n_source_refs);
+                 rsx_perf_add(RSX_PERF_W_VTX_N, dc.n_refs);
+-                rsx_perf_add(RSX_PERF_W_VTX_BYTES, (long long)dc.n_refs * 4 + dc.vg_d.block_bytes);
++                rsx_perf_add(RSX_PERF_W_VTX_BYTES, (long long)dc.n_refs * (long long)sizeof(*dc.refs) + dc.vg_d.block_bytes);
+             }
+             return;
+         }
+@@ -13590,7 +13589,7 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
+ 
+     if (!vc_hit) live_a010_geom_trace(prim, n_tri);   /* patch 2047: a hit has no CPU-side payload */
+ 
+-    const u32 vertex_stride = dc.vg ? 4u :   /* patch 2076: one u32 element index */
++    const u32 vertex_stride = dc.vg ? (u32)sizeof(rsx_vertex_ref) :
+         ld_vertex_compact_payload() ? used_layout.stride : VERT_STRIDE;
+     const u32 uploaded_vertices = indexed ? dc.n_verts : n_tri;
+     const int vd_hit = vc_hit && vc_hit->dev_len;   /* patch 2092: the payload and indices are in the device cache */
+diff --git a/libs/video/rsx_vp_decompiler.c b/libs/video/rsx_vp_decompiler.c
+index d3b826d..415f544 100644
+--- a/libs/video/rsx_vp_decompiler.c
++++ b/libs/video/rsx_vp_decompiler.c
+@@ -640,7 +640,7 @@ static int rsx_vp_decompile_impl(
+             "    float4 a12:ATTR12; float4 a13:ATTR13; float4 a14:ATTR14; float4 a15:ATTR15;\n"
+             "};\n");
+     } else if (compact_inputs == 2) {   /* patch 2076 */
+-        emit(&o, "struct VSInput {\n    uint vg_e:VGIDX;\n};\n");
++        emit(&o, "struct VSInput {\n    uint2 vg_e:VGIDX;\n};\n");
+         emit(&o, RSX_VG_HLSL);
+     } else {
+         emit(&o, "struct VSInput {\n");
+diff --git a/libs/video/rsx_vtx_gpu.h b/libs/video/rsx_vtx_gpu.h
+index a5c7f33..4d29445 100644
+--- a/libs/video/rsx_vtx_gpu.h
++++ b/libs/video/rsx_vtx_gpu.h
+@@ -3,16 +3,16 @@
+  *
+  * The CPU path decodes every attribute of every unique vertex into float4 slots (rsx_vertex_fetch_many) and
+  * uploads 16 bytes per slot. In this mode a draw uploads the raw guest bytes its attributes span instead, plus a
+- * 512-byte attribute table, and the vertex shader decodes them: the per-vertex payload is one u32, the element
+- * index (vertex_id + base_index) & 0xFFFFF of the unique reference.
++ * 512-byte attribute table, and the vertex shader decodes them. The per-vertex payload is the original
++ * vertex_id and base_index so each attribute can apply its own frequency and divider operation.
+  *
+  * Block layout (one per draw, in the vertex upload ring, bound as the root SRV t20, ByteAddressBuffer vg_raw):
+  *   [0, 512)  16 rows of rsx_vg_attr: uint4 {base, stride, fmt, lim}, float4 default
+  *   [512, ..) the merged raw spans, each placed so its host address and block offset agree mod 4
+- * Attribute i of element e reads at base + e * stride (u32 arithmetic, wraps like the C code), clamped to lim (the
+- * last element's address), so a reference outside the draw's span stays inside the block (root SRVs have no
+- * bounds check). fmt = type | n << 4, n = min(size, 4); fmt 0 = the row's default (disabled attribute, or a
+- * register the layout does not feed: (0,0,0,1), as the compact CPU path).
++ * Attribute i of element e reads at base + e * stride (u32 arithmetic, wraps like the C code). For guest arrays,
++ * lim is the last element's address; for INLINE_ARRAY it is the last element index, and out-of-range attributes
++ * use their default. fmt holds the type, size, frequency, divider operation and inline flag; type 0 uses the
++ * row's default.
+  *
+  * Exactness: FLOAT and HALF are built from the bits (same integer steps as rsx_compact_be_f16), UINT8 and SINT16
+  * are exact integer conversions, and the three formats with a division (UNORM8 x/255, SNORM16 x/32767, CMP32
+@@ -35,6 +35,25 @@
+ #define RSX_VG_LUT_CMPZ    67840u    /* 1,024 entries, by the 10-bit field */
+ #define RSX_VG_LUT_WORDS   68864u
+ 
++#define RSX_VG_CODE(...) __VA_ARGS__
++#define RSX_VG_TEXT(...) #__VA_ARGS__
++
++/* Shared by the CPU planner and HLSL; fmt bits 8-23 are frequency and bit 24 is modulo. */
++#define RSX_VG_INDEX(X) X( \
++VG_IDX_FN uint vg_element(uint vertex_id, uint base_index, uint fmt) { \
++    uint frequency = (fmt >> 8u) & 65535u; \
++    uint modulo = (fmt >> 24u) & 1u; \
++    if (frequency == 0u || (frequency == 1u && modulo == 0u)) \
++        return (vertex_id + base_index) & 0x000FFFFFu; \
++    return modulo != 0u ? vertex_id % frequency : vertex_id / frequency; \
++} )
++typedef u32 rsx_vg_uint;
++#define uint rsx_vg_uint
++#define VG_IDX_FN static inline
++RSX_VG_INDEX(RSX_VG_CODE)
++#undef VG_IDX_FN
++#undef uint
++
+ /* The decode, in the C/HLSL common subset. VG_FN, VG_RAW(a) (the little-endian dword at byte a, a % 4 == 0),
+  * VG_LUT(i) (float i of the table), uint, asint and asfloat come from the including side. The LUT offsets are the
+  * RSX_VG_LUT_* numbers (checked by the host test). Types: 1 SNORM16, 2 FLOAT, 3 HALF, 4 UNORM8, 5 SINT16,
+@@ -52,7 +71,8 @@ VG_FN float vg_fetch(uint base, uint stride, uint fmt, uint lim, float dflt, uin
+     uint n = (fmt >> 4u) & 15u; \
+     uint a = base + e * stride; \
+     if (t == 0u) return dflt; \
+-    if (a > lim) a = lim; \
++    if ((fmt & 0x02000000u) != 0u) { if (e > lim) return dflt; } \
++    else if (a > lim) a = lim; \
+     if (t == 6u) { \
+         uint w = vg_be32(a); \
+         if (c == 0u) return VG_LUT(65792u + (w & 0x7FFu)); \
+@@ -74,21 +94,21 @@ VG_FN float vg_fetch(uint base, uint stride, uint fmt, uint lim, float dflt, uin
+     if (t == 5u) return (float)(asint(vg_be16(a + c * 2u) << 16u) >> 16); \
+     return 0.0f; \
+ } )
+-#define RSX_VG_CODE(...) __VA_ARGS__
+-#define RSX_VG_TEXT(...) #__VA_ARGS__
+-
+ /* What the vertex shader declares (HLSL): the two buffers, the macros the shared code uses, the code, and the
+  * per-attribute float4 reader. */
+ #define RSX_VG_HLSL \
+     "ByteAddressBuffer vg_raw : register(t20);\n" \
+     "ByteAddressBuffer vg_lut : register(t21);\n" \
+     "#define VG_FN\n" \
++    "#define VG_IDX_FN\n" \
+     "#define VG_RAW(a) vg_raw.Load(a)\n" \
+     "#define VG_LUT(i) asfloat(vg_lut.Load((i) * 4u))\n" \
++    RSX_VG_INDEX(RSX_VG_TEXT) "\n" \
+     RSX_VG_SHARED(RSX_VG_TEXT) "\n" \
+-    "float4 vg_attr(uint i, uint e) {\n" \
++    "float4 vg_attr(uint i, uint2 ref) {\n" \
+     "    uint r = i * 32u;\n" \
+     "    uint b = vg_raw.Load(r); uint s = vg_raw.Load(r + 4u); uint f = vg_raw.Load(r + 8u); uint l = vg_raw.Load(r + 12u);\n" \
++    "    uint e = vg_element(ref.x, ref.y, f);\n" \
+     "    return float4(vg_fetch(b, s, f, l, asfloat(vg_raw.Load(r + 16u)), e, 0u),\n" \
+     "                  vg_fetch(b, s, f, l, asfloat(vg_raw.Load(r + 20u)), e, 1u),\n" \
+     "                  vg_fetch(b, s, f, l, asfloat(vg_raw.Load(r + 24u)), e, 2u),\n" \
+@@ -108,16 +128,21 @@ typedef struct rsx_vg_draw {
+ /* Why a draw stays on the CPU path ([vtx-gpu] log columns). */
+ enum { RSX_VG_OK = 0, RSX_VG_NO_INPUTS, RSX_VG_DIVIDED, RSX_VG_UNMAPPED, RSX_VG_TYPE, RSX_VG_BIG, RSX_VG_REASONS };
+ 
+-/* The per-vertex payload: the element index every non-divided attribute reads (rsx_vertex_element_index with
+- * frequency <= 1; the host test compares the two). */
+-static inline u32 rsx_vg_element(const rsx_vertex_ref* r) { return (r->vertex_id + r->base_index) & 0x000FFFFFu; }
++static inline u32 rsx_vg_format(const rsx_vertex_fetch_plan* p, u32 attr)
++{
++    const rsx_vertex_fetch_attr* f = &p->attr[attr];
++    return f->desc.type | ((f->desc.size < 4u ? f->desc.size : 4u) << 4) |
++           (f->desc.frequency << 8) | (((p->divider_mask >> attr) & 1u) << 24) |
++           (p->inline_data ? 0x02000000u : 0u);
++}
+ 
+ /* Plan one draw from a prepared fetch plan (rsx_vertex_fetch_plan_prepare over the draw's unique refs): every
+- * enabled attribute of the layout needs its whole element range mapped (stable_base), frequency <= 1 and a known
+- * type; otherwise the draw keeps the CPU path and the reason is returned. */
+-static inline int rsx_vg_plan(const rsx_vertex_fetch_plan* p, u32 max_block, rsx_vg_draw* d)
++ * enabled attribute needs its range mapped and a known type. An invalid inline position must stay on the CPU
++ * path, which drops the draw rather than using a default. */
++static inline int rsx_vg_plan(const rsx_vertex_fetch_plan* p, const rsx_vertex_ref* refs, u32 count,
++                              u32 max_block, rsx_vg_draw* d)
+ {
+-    if (!p->layout.count) return RSX_VG_NO_INPUTS;
++    if (!p->layout.count || !refs || !count) return RSX_VG_NO_INPUTS;
+     memset(d->table, 0, sizeof d->table);
+     for (u32 a = 0; a < RSX_DSP_NUM_VERTEX_ATTR; a++) d->table[a].dflt[3] = 1.0f;
+     struct { const u8* src; u64 bytes; } cand[RSX_DSP_NUM_VERTEX_ATTR];
+@@ -126,9 +151,16 @@ static inline int rsx_vg_plan(const rsx_vertex_fetch_plan* p, u32 max_block, rsx
+         const u32 a = p->layout.attrs[s];
+         const rsx_vertex_fetch_attr* f = &p->attr[a];
+         if (!f->desc.type || !f->desc.size) { memcpy(d->table[a].dflt, f->default_value, 16); continue; }
+-        if (f->desc.frequency > 1) return RSX_VG_DIVIDED;
++        if (f->desc.frequency > 65535u) return RSX_VG_DIVIDED;
+         if (f->desc.type < 1 || f->desc.type > 7 || !f->elem_size) return RSX_VG_TYPE;
+         if (!f->stable_base) return RSX_VG_UNMAPPED;
++        if (p->inline_data && a == 0u) {
++            const u32 fmt = rsx_vg_format(p, a);
++            for (u32 i = 0; i < count; i++) {
++                const u32 e = vg_element(refs[i].vertex_id, refs[i].base_index, fmt);
++                if (e < f->stable_first || e > f->stable_last) return RSX_VG_UNMAPPED;
++            }
++        }
+         const u64 bytes = (u64)(f->stable_last - f->stable_first) * f->stride + f->elem_size;
+         if (bytes > max_block) return RSX_VG_BIG;
+         cand[nc].src = f->stable_base; cand[nc].bytes = bytes; nc++;
+@@ -165,8 +197,9 @@ static inline int rsx_vg_plan(const rsx_vertex_fetch_plan* p, u32 max_block, rsx
+         rsx_vg_attr* t = &d->table[a];
+         t->stride = f->stride;
+         t->base = first_at - f->stable_first * f->stride;
+-        t->lim = first_at + (f->stable_last - f->stable_first) * f->stride;
+-        t->fmt = f->desc.type | ((f->desc.size < 4u ? f->desc.size : 4u) << 4);
++        t->lim = p->inline_data ? f->stable_last : first_at + (f->stable_last - f->stable_first) * f->stride;
++        t->fmt = rsx_vg_format(p, a);
++        memcpy(t->dflt, f->default_value, sizeof t->dflt);
+     }
+     return RSX_VG_OK;
+ }
+@@ -203,7 +236,6 @@ static inline void rsx_vg_lut_build(float* lut)
+ 
+ #ifdef RSX_VG_C_REFERENCE
+ /* The shared decode as C, for host tests: the includer defines VG_RAW(a) and VG_LUT(i) first. */
+-typedef unsigned int rsx_vg_uint;
+ #define uint rsx_vg_uint
+ #define VG_FN static inline
+ static inline float asfloat(uint w) { float f; memcpy(&f, &w, sizeof f); return f; }

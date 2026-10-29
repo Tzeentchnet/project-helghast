@@ -1,0 +1,156 @@
+diff --git a/libs/video/rsx_live_draw.c b/libs/video/rsx_live_draw.c
+index b17f4a6..2bbabde 100644
+--- a/libs/video/rsx_live_draw.c
++++ b/libs/video/rsx_live_draw.c
+@@ -10150,6 +10150,8 @@ static draw_ctx dc;
+  * guest bytes its attributes span plus a 512-byte table and one rsx_vertex_ref per unique vertex; the vertex shader decodes
+  * (t20 = the draw's block, t21 = the decode table). Other draws keep the CPU fetch; [vtx-gpu] gives both counts
+  * and the reasons per frame (mean over the last 60 frames). LD_VTX_GPU_MB caps one draw's block (default 8 MB).
++ * Cache hits use the normal CPU-decoded payload; a candidate is decoded on the CPU to fill or verify the cache.
++ * LD_VTX_CACHE=0 disables this hybrid and always attempts GPU fetch.
+  * -----------------------------------------------------------------------*/
+ static struct {
+     int on;                    /* -1 unread */
+@@ -10157,7 +10159,8 @@ static struct {
+     UINT root;                 /* root parameter of t20; t21 = root + 1 */
+     ID3D12Resource* lut;       /* upload heap, RSX_VG_LUT_WORDS floats */
+     unsigned long long draws, cpu, why[RSX_VG_REASONS], verts, block_bytes, frames;
+-} g_vg = { -1, 0, 0, NULL, 0, 0, {0}, 0, 0, 0 };
++    unsigned long long cache_hits, cache_fills, cache_waits, cache_retries;
++} g_vg = { .on = -1 };
+ static int ld_vtx_gpu_on(void)
+ {
+     if (g_vg.on < 0) {
+@@ -10178,11 +10181,14 @@ static void ld_vg_frame(void)   /* at each flip */
+     if (g_vg.on <= 0) return;
+     if (++g_vg.frames < 60) return;
+     const double n = (double)g_vg.frames;
+-    fprintf(stderr, "[vtx-gpu] frame=%u per-frame: gpu=%.1f cpu=%.1f (no-inputs=%.1f divided=%.1f unmapped=%.1f"
+-                    " type=%.1f big=%.1f) verts=%.0f block=%.1fKB\n", g_ld_frames, g_vg.draws / n, g_vg.cpu / n,
++    fprintf(stderr, "[vtx-gpu] frame=%u per-frame: gpu=%.1f cpu=%.1f (no-inputs=%.1f freq-range=%.1f unmapped=%.1f"
++                    " type=%.1f big=%.1f) cache-hit=%.1f fill=%.1f wait=%.1f retry=%.1f verts=%.0f block=%.1fKB\n",
++            g_ld_frames, g_vg.draws / n, g_vg.cpu / n,
+             g_vg.why[RSX_VG_NO_INPUTS] / n, g_vg.why[RSX_VG_DIVIDED] / n, g_vg.why[RSX_VG_UNMAPPED] / n,
+-            g_vg.why[RSX_VG_TYPE] / n, g_vg.why[RSX_VG_BIG] / n, g_vg.verts / n, g_vg.block_bytes / n / 1024.0);
++            g_vg.why[RSX_VG_TYPE] / n, g_vg.why[RSX_VG_BIG] / n, g_vg.cache_hits / n, g_vg.cache_fills / n,
++            g_vg.cache_waits / n, g_vg.cache_retries / n, g_vg.verts / n, g_vg.block_bytes / n / 1024.0);
+     g_vg.draws = g_vg.cpu = g_vg.verts = g_vg.block_bytes = g_vg.frames = 0;
++    g_vg.cache_hits = g_vg.cache_fills = g_vg.cache_waits = g_vg.cache_retries = 0;
+     memset(g_vg.why, 0, sizeof g_vg.why);
+ }
+ 
+@@ -10425,7 +10431,7 @@ static void fetch_batches(void)
+ }
+ 
+ static void fetch_batches_hoisted(
+-    const rsx_vertex_layout_plan* layout, int packed_payload)
++    const rsx_vertex_layout_plan* layout, int packed_payload, int gpu_allowed)
+ {
+     LDW_T0(refs_t0);   /* patch 2033: vertex-fetch split */
+     for (u32 batch = 0; batch < dc.n_arr && dc.fetch_ok; batch++)
+@@ -10514,7 +10520,7 @@ static void fetch_batches_hoisted(
+         if (dc.fetch_plan.attr[attr].desc.frequency >= 2)
+             g_ld_divider_fetches += dc.n_refs;
+     }
+-    if (packed_payload && ld_vtx_gpu_on()) {   /* patch 2076 */
++    if (packed_payload && gpu_allowed) {
+         const int why = rsx_vg_plan(&dc.fetch_plan, dc.refs, dc.n_refs, g_vg.max_block, &dc.vg_d);
+         if (why == RSX_VG_OK && reserve_compact_vertices((u64)dc.n_refs * sizeof(*dc.refs))) {
+             memcpy(dc.compact_verts, dc.refs, (size_t)dc.n_refs * sizeof(*dc.refs));
+@@ -10613,7 +10619,8 @@ static void fetch_batches_hoisted(
+ #define LD_VC_SPANS 17u
+ typedef rsx_vd_span ld_vc_span;   /* patch 2092: the sampled hash moved to ld_vc_entry.sh */
+ typedef struct {
+-    u64 h; u32* key; u32 key_n;
++    u64 h;     u8 gpu_retry; u32 gpu_retry_frame;
++    u32* key; u32 key_n;
+     u8 state;          /* 0 empty, 1 seen (no data), 2 filled */
+     u8 dyn;            /* invalidated by tracked writes (2 = never filled again); 3 = a source span is in main
+                         * memory without LD_VTX_CACHE_MAIN (the key holds the locations): never again */
+@@ -10871,6 +10878,10 @@ static ld_vc_entry* ld_vc_lookup(u32 prim, const rsx_vertex_layout_plan* layout,
+     }
+     if (e->dyn == 3) { g_vc_st.inel_main++; return NULL; }
+     if (e->dyn >= 2) { g_vc_st.dyn_skip++; return NULL; }
++    if (ld_vtx_gpu_on() && e->gpu_retry) {
++        if (rsx_vg_cache_wait(g_ld_frames, e->gpu_retry_frame)) { g_vg.cache_waits++; return NULL; }
++        e->gpu_retry = 0;
++    }
+     *slot = e;
+     return NULL;
+ }
+@@ -13544,20 +13555,24 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
+     LDW_ADD(RSX_PERF_W_D_PRE_T, pre_t0);
+     LDW_T0(vtx_t0);
+     ld_vc_entry* vc_hit = NULL; ld_vc_entry* vc_fill = NULL; int vc_verify = 0;   /* patch 2047 */
+-    if (ld_vertex_compact_payload() && ld_vc_mode() && !ld_vtx_gpu_on()) {   /* 2076: no payload to cache */
++    if (ld_vertex_compact_payload() && ld_vc_mode()) {
+         vc_hit = ld_vc_lookup(prim, &used_layout, &vc_fill);
+         if (vc_hit && ld_vc_mode() == 2) { vc_fill = vc_hit; vc_hit = NULL; vc_verify = 1; }
+     }
+-    if (vc_hit) {   /* patch 2047: replay the bytes uploaded when the entry was filled */
++    const int gpu_enabled = ld_vertex_compact_payload() && ld_vtx_gpu_on();
++    const int vg_route = rsx_vg_route(gpu_enabled, vc_hit != NULL, vc_fill != NULL);
++    if (vg_route == RSX_VG_ROUTE_CACHE) {
++        if (gpu_enabled) g_vg.cache_hits++;
+         dc.n_verts = vc_hit->n_verts; dc.n_source_refs = vc_hit->n_source_refs;
+         dc.layout = used_layout; dc.fetch_ok = 1;
+     } else if (ld_vertex_compact_payload()) {
+-        fetch_batches_hoisted(&used_layout, 1);
++        if (gpu_enabled && vg_route == RSX_VG_ROUTE_FILL) g_vg.cache_fills++;
++        fetch_batches_hoisted(&used_layout, 1, vg_route == RSX_VG_ROUTE_GPU);
+         if (vc_fill && !vc_verify && dc.fetch_ok) g_vc_st.miss_verts += dc.n_verts;
+     } else if (ld_vertex_hoist_fetch()) {
+         rsx_vertex_layout_plan legacy_layout;
+         ld_layout_plan_get(0xFFFFu, &legacy_layout);
+-        fetch_batches_hoisted(&legacy_layout, 0);
++        fetch_batches_hoisted(&legacy_layout, 0, 0);
+     } else {
+         fetch_batches();
+     }
+@@ -13645,10 +13660,17 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
+     } else if (vc_hit) {   /* patch 2047 */
+         if (indexed && draw_ib_bytes)
+             memcpy((u8*)g.ib_mapped + g.ib_used, vc_hit->data + vc_hit->vb_bytes, (size_t)draw_ib_bytes);
+-    } else if (vc_fill && dc.fetch_ok)
++    } else if (vc_fill && dc.fetch_ok) {
+         ld_vc_after_fetch(vc_fill, vc_verify, prim, vertex_data, (u32)draw_vb_bytes, (u32)draw_ib_bytes, n_tri,
+                           indexed, (u32*)((u8*)g.ib_mapped + g.ib_used));
+-    else if (indexed) {
++        if (gpu_enabled && !vc_verify) {
++            vc_fill->gpu_retry = vc_fill->state != 2;
++            if (vc_fill->gpu_retry) {
++                vc_fill->gpu_retry_frame = g_ld_frames + RSX_VG_CACHE_RETRY_FRAMES;
++                g_vg.cache_retries++;
++            }
++        }
++    } else if (indexed) {
+         VDP_T0(ix_t0);   /* patch 2093 */
+         write_topology_indices(
+             prim, (u32*)((u8*)g.ib_mapped + g.ib_used));
+diff --git a/libs/video/rsx_vtx_gpu.h b/libs/video/rsx_vtx_gpu.h
+index 4d29445..94ee6ee 100644
+--- a/libs/video/rsx_vtx_gpu.h
++++ b/libs/video/rsx_vtx_gpu.h
+@@ -128,6 +128,22 @@ typedef struct rsx_vg_draw {
+ /* Why a draw stays on the CPU path ([vtx-gpu] log columns). */
+ enum { RSX_VG_OK = 0, RSX_VG_NO_INPUTS, RSX_VG_DIVIDED, RSX_VG_UNMAPPED, RSX_VG_TYPE, RSX_VG_BIG, RSX_VG_REASONS };
+ 
++enum { RSX_VG_ROUTE_CPU, RSX_VG_ROUTE_GPU, RSX_VG_ROUTE_CACHE, RSX_VG_ROUTE_FILL };
++#define RSX_VG_CACHE_RETRY_FRAMES 60u
++
++static inline int rsx_vg_route(int gpu_enabled, int cache_hit, int cache_fill)
++{
++    if (cache_hit) return RSX_VG_ROUTE_CACHE;
++    if (cache_fill) return RSX_VG_ROUTE_FILL;
++    return gpu_enabled ? RSX_VG_ROUTE_GPU : RSX_VG_ROUTE_CPU;
++}
++
++static inline int rsx_vg_cache_wait(u32 frame, u32 retry_frame)
++{
++    const u32 remaining = retry_frame - frame;
++    return remaining != 0u && remaining <= RSX_VG_CACHE_RETRY_FRAMES;
++}
++
+ static inline u32 rsx_vg_format(const rsx_vertex_fetch_plan* p, u32 attr)
+ {
+     const rsx_vertex_fetch_attr* f = &p->attr[attr];

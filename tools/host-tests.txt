@@ -101,6 +101,9 @@ tools/spu/test_spu_rmask.sh
 tools/spu/test_spu_lscold.sh
 tools/spu/test_spu_shufh.sh
 tools/smoke/test_tex_lru.sh
+tools/smoke/test_vtx_gpu.sh
+tools/smoke/test_vtx_dev.sh
+tools/smoke/test_wb_gpu.sh
 tools/release/test_stage_sdl3.py
 tools/spu/test_lr_lastcheck.sh
 tools/spu/test_lang_layer.py

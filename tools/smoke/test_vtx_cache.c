@@ -12,6 +12,7 @@
  * Counters (rsx_live_draw_debug_vc_stats): hits >= 8, inval-tracked >= 4, inval-sample >= 2 in mode 1; in verify
  * mode every hit is fetched again and compared: verify-bad must be 0 and verify-ok >= 8.
  * KZ3_VC_MODE = 1 (default) | verify | 0 (cache off: every case still passes, the counters stay 0).
+ * KZ3_EXPECT_VTX_GPU=1/0 asserts that GPU-fetch draws were/were not submitted.
  * Usage: test_vtx_cache.exe (exit 0 and "[test_vtx_cache] PASS"). Built by tools/smoke/build-host.sh, run under
  * Proton with tools/proton-test.sh inside tools/agents/lock.sh gpu.
  */
@@ -132,6 +133,7 @@ static __attribute__((unused)) void emit_copy(u32 in_dma, u32 out_dma, u32 off_i
 #define DST0   0x00020000u   /* local: destination surfaces, 0x1000 apart */
 
 extern void rsx_live_draw_present(u32 buffer_id);
+extern void  rsx_live_draw_debug_gpu_offload_stats(u64 out[2]);
 extern void rsx_live_draw_note_guest_write_pages(u32 location, u32 offset, u32 size);
 extern void rsx_live_draw_debug_vc_stats(u64 out[6]);
 
@@ -302,6 +304,14 @@ int main(void)
     } else if (!strcmp(mode, "verify")) {
         if (st[5] || st[4] < 8) { printf("[test_vtx_cache] FAIL counters: want verify-bad=0, verify-ok>=8\n"); g_fail++; }
     } else if (st[0] || st[1]) { printf("[test_vtx_cache] FAIL counters: cache off but used\n"); g_fail++; }
+    u64 gpu[2]; rsx_live_draw_debug_gpu_offload_stats(gpu);
+    const char* expect_gpu = getenv("KZ3_EXPECT_VTX_GPU");
+    printf("[test_vtx_cache] GPU-fetch draws=%llu\n", (unsigned long long)gpu[0]);
+    if (expect_gpu && ((strcmp(expect_gpu, "1") && strcmp(expect_gpu, "0")) ||
+                       (!!gpu[0] != !strcmp(expect_gpu, "1")))) {
+        printf("[test_vtx_cache] FAIL: GPU fetch did not match KZ3_EXPECT_VTX_GPU=%s\n", expect_gpu);
+        g_fail++;
+    }
     printf("[test_vtx_cache] %d checks match, %d mismatch\n", g_pass, g_fail);
     printf("[test_vtx_cache] %s\n", g_fail ? "FAIL" : "PASS");
     cellGcmTerminate();
