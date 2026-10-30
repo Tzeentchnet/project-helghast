@@ -20,7 +20,7 @@ Where each feature of the PS3 game stands today, and the port-only features with
 | 🔧 | The whole campaign, start to finish: all 9 chapters load and play for minutes; one chapter (Pyrrhus Outskirts) has been played by hand to its end (2026-10-20), the others not played through. Remaining: level streaming, scripts, physics, AI, every mission |
 | 🔧 | **Error and runtime logging:** per-run log files, crash reports with an error box, quiet by default |
 | 🔧 | Save games in your user folder (checkpoints save and reload today); local trophies (shown by the port, not synced anywhere) are planned |
-| ✅ | **Installer and portable zip** (Windows): check your own disc dump and 1.14 update, then build the port on your machine with a bundled compiler; nothing of the game is shipped or downloaded. Published as pre-releases (latest <!-- version -->v0.1.5<!-- /version -->) |
+| ✅ | **Installer and portable zip** (Windows): check your own disc dump and 1.14 update, then build the port on your machine with a bundled compiler; nothing of the game is shipped or downloaded. Published as pre-releases (latest <!-- version -->v0.1.7<!-- /version -->) |
 
 ## 2. PC display and settings  🔧
 
@@ -77,7 +77,7 @@ Where each feature of the PS3 game stands today, and the port-only features with
 - **Going native, after feature parity and VR:** replace the run-time layers step by step: a native renderer fed by
   the engine's own draw lists, native SPU jobs, then rewritten game code where it pays off
   ([what is native today](HOW-IT-WORKS.md#what-kind-of-port-is-this))
-- 🔧 **Discord Rich Presence** (built, opt-in via "Discord status on or off" in the Start menu or `discord_presence = 1` in `kz3.ini`, still being tested): show "Playing Killzone 3" with the current chapter in your Discord status,
+- 🔧 **Discord Rich Presence** (built, opt-in via "Discord status on or off" in the Start menu or `discord_presence = 1` in `kz3.ini`, still being tested): show "Playing Project Helghast" with the current chapter in your Discord status,
   through the Discord desktop app on your own PC; nothing is sent when it is off
 
 ## Not planned

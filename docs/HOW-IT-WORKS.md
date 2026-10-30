@@ -13,7 +13,7 @@ recompilation with a runtime layer, plus native replacements where they matter. 
 | Part | How it runs today |
 |---|---|
 | PPU game code | recompiled ahead of time to C, compiled for x64 |
-| SPU programs and jobs | recompiled ahead of time; SPURS scheduling and DMA are reproduced by the runtime |
+| SPU programs and jobs | recompiled ahead of time; SPURS scheduling and DMA are reproduced by the runtime. One job runs as native C by default with the 1.14 update: the light-probe job (`KZ3_NATIVE_JOB_LIGHTPROBES=0` runs the recompiled job instead) |
 | Graphics | **translated at run time**: the game's RSX command stream is replayed on Direct3D 12, shaders translated from RSX microcode (the same kind of work an emulator's GPU layer does) |
 | Memory | the PS3's big-endian layout, kept as the recompiled code expects it |
 | System libraries (lv2, cell*) | reimplemented on PC APIs (high-level emulation) |
@@ -71,9 +71,10 @@ them does not update an installed release. They are experiments, not measured fr
   can outweigh the saved CPU conversion work.
 
 Compare each switch separately against the default using the same build, scene, input and cache state, including
-guest-frame pacing and CPU/GPU timings. Graphics-oriented SPU jobs, including skinning and post-processing, still run
-as recompiled CPU code; replacing them requires preserving their guest-visible memory and synchronization effects.
-No in-level performance or compatibility result is implied by these switches.
+guest-frame pacing and CPU/GPU timings. These switches do not move graphics-oriented SPU jobs to the GPU: they remain
+CPU-side, either recompiled or using native replacements (including 1.14 light probes by default). Replacing a job
+requires preserving its guest-visible memory and synchronization effects. No in-level performance or compatibility
+result is implied by these switches.
 
 The game-free `tools/smoke/test_gpu_offload_d3d12.sh` builds a Windows executable that compares the shared vertex
 and packing shaders with CPU results on D3D12. It uses adapter 0 by default; `RSX_TEST_ADAPTER=N` selects another

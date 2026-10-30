@@ -155,6 +155,7 @@ def ctx_for(root, paths):
 def decide(root):
     """-> (action, reason); action is one of first-build, missing-inputs, resume, rebuild, run."""
     build = os.path.join(root, "build")
+    fr.heal_moved_paths(root, build)   # a moved install: recorded paths below the old folder follow it (issue 20 follow-up)
     paths = load_json(os.path.join(build, "paths.json"))
     if not paths or not paths.get("dump"):
         return "first-build", "The port is not built on this computer yet"
@@ -164,6 +165,8 @@ def decide(root):
     stamp = load_json(os.path.join(build, "build-stamp.json"))
     if not stamp or not os.path.isfile(os.path.join(build, "kz3.exe")):
         return "resume", "The last build did not finish"
+    if fr.root_moved(fr.Ctx(root=root, build=build))[0]:
+        return "rebuild", "The install folder was moved or renamed since the port was built (configure and compile again)"
     if paths.get("eboot") and stamp.get("eboot_stat") != fr.eboot_stat(paths["eboot"]):
         return "rebuild", "The EBOOT changed since the port was built (lift and compile again)"
     now, then = ctx_for(root, paths).parts(), stamp.get("parts") or {}
@@ -431,9 +434,35 @@ def _is_dir_link(p):
     return bool(isj and isj(p))
 
 
+def _undo_link(link):
+    """Remove what a failed link attempt left at `link`: a reparse point (link, junction) or an EMPTY folder, nothing
+    else (rmdir refuses a folder with content, which stays). -> True when nothing is left there."""
+    if not os.path.lexists(link):
+        return True
+    try:
+        try:
+            os.unlink(link)
+        except OSError:
+            os.rmdir(link)
+    except OSError:
+        return False
+    return True
+
+
+def _link_error_words(text):
+    """Plain words for the Windows errors a link attempt gives."""
+    if "1392" in text:
+        return (" WinError 1392: the drive's file system may not support folder junctions, "
+                "or it may be damaged; the safe step is an install folder on an NTFS drive such as C:")
+    return ""
+
+
 def _make_dir_link(target, link):
-    """Directory junction on Windows (no admin rights or developer mode needed), else a symlink. -> error or ""."""
+    """Directory junction on Windows (no admin rights or developer mode needed), else a symlink. -> error or "".
+    A failed attempt removes what it created (CreateJunction makes the folder first and leaves it empty when the
+    reparse step fails; the symlink would then fail with WinError 183, exists), so the next try starts clean."""
     errs = []
+    existed = os.path.lexists(link)
     if os.name == "nt":
         try:
             import _winapi
@@ -441,12 +470,16 @@ def _make_dir_link(target, link):
             return ""
         except (ImportError, AttributeError, OSError) as e:
             errs.append(f"junction: {e}")
+            if not existed:
+                _undo_link(link)
     try:
         os.symlink(target, link, target_is_directory=True)
         return ""
     except (OSError, NotImplementedError) as e:
         errs.append(f"symlink: {e}")
-    return "; ".join(errs)
+        if not existed:
+            _undo_link(link)
+    return "; ".join(errs) + "." + _link_error_words("; ".join(errs))
 
 
 def link_free(root, build=None):
@@ -466,8 +499,10 @@ def ensure_vfs(root, dump, no_link=False):
     (removing a link never touches its target; a real PS3_GAME folder there is left alone).
 
     The player's dump is read in place and never written: the runtime's writes (psarc-cache, /dev_hdd1 cache) land
-    in <root>/vfs. A real folder already named PS3_GAME there is never removed (error instead); a link to another
-    dump (the player picked a new folder) is replaced; removing a link leaves its target alone."""
+    in <root>/vfs. A real folder named PS3_GAME there that our link record does not name is never removed (error
+    instead); with our record (a moved install keeps the old link text) only an empty one can go (rmdir; a non-empty
+    one gives an error); a link to another dump (the player picked a new folder) is replaced; removing a link leaves
+    its target alone."""
     v = vfs_root(root)
     link = os.path.join(v, "PS3_GAME")
     target = os.path.join(dump, "PS3_GAME")
@@ -487,7 +522,7 @@ def ensure_vfs(root, dump, no_link=False):
             except OSError:
                 pass
         return v, ""
-    if _is_dir_link(link) or (os.path.isdir(link) and (load_json(rec) or {}).get("link") == link):
+    if _is_dir_link(link) or (os.path.isdir(link) and (load_json(rec) or {}).get("link")):   # any record of ours: a moved install keeps the old link text
         if (load_json(rec) or {}).get("target") == target and os.path.isdir(link):
             return v, ""
         try:
@@ -497,7 +532,7 @@ def ensure_vfs(root, dump, no_link=False):
                 os.rmdir(link)      # a junction on older Pythons; RemoveDirectory removes the link only
         except OSError as e:
             return v, f"Could not replace the old link {link} ({e})"
-    elif os.path.lexists(link):
+    elif os.path.lexists(link) and not (os.path.isdir(link) and _undo_link(link)):   # an empty folder (a failed attempt's leftover) goes
         return v, f"{link} is a real folder, not a link to the game folder; move it away and start again"
     err = _make_dir_link(target, link)
     if err:
@@ -695,6 +730,8 @@ def setup_paths(root):
     cp = configparser.ConfigParser()
     cp.read(os.path.join(root, "kz3-install.ini"), encoding="utf-8")
     g = {k: cp.get("paths", k, fallback="").strip() for k in ("dump", "update", "eboot", "font_dir")}
+    bad = [k for k, v in g.items() if any(c in v for c in fr.CMAKE_BAD)]
+    g = {k: ("" if k in bad else v) for k, v in g.items()}   # a recorded path with [ ] ; is dropped and asked again
     return g if g["dump"] and g["update"] else {}
 
 
@@ -928,7 +965,7 @@ def discord_toggle(root, ui):
     kz3.ini, every other key stays)."""
     p = os.path.join(root, "build", GAME_INI)
     on = read_game_ini(p).get(DISCORD_KEY, "0").strip().lower() in ("1", "true", "yes", "on")
-    what = ("the port tells the Discord app on this PC what to show on your profile (\"Playing Killzone 3\" with the "
+    what = ("the port tells the Discord app on this PC what to show on your profile (\"Playing Project Helghast\" with the "
             "current chapter). Nothing is sent when it is off. The Discord app must be running.")
     if ui.ask(f"Discord status is on: {what}\n\nTurn the Discord status off?" if on else
               f"Discord status is off.\n\nTurn it on? If you do, {what}"):
@@ -1085,6 +1122,7 @@ def main(argv=None, ui=None, run=run_wait, start=spawn, today=None, environ=None
     gargv = game_argv(root, paths, extra)
     note(root, f"kz3.ini: {write_game_ini(root, game_ini(root, paths, ini['portable'], environ))}")
     note(root, "game: " + " ".join(gargv) + f" (cwd {cwd}; the game's log is in build\\logs)")
+    fr.place_lang(root, os.path.dirname(gargv[0]))
     fr.place_fonts(root, os.path.dirname(gargv[0]))     # the notice fonts next to kz3.exe (RSX pass 38)
     fr.place_sdl3(root, os.path.dirname(gargv[0]))      # SDL3.dll next to kz3.exe: native pads (patch 4010)
     os.makedirs(cwd, exist_ok=True)

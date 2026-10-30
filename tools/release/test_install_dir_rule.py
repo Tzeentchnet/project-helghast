@@ -49,4 +49,19 @@ m = re.search(r"function InstallDirProblem.*?\nend;", t, re.S)
 check(m and "else if InOneDrive(D) then" in m.group(0) and "inside OneDrive" in m.group(0) and
       "outside OneDrive" in m.group(0) and "%LOCALAPPDATA%" in m.group(0),
       "InstallDirProblem refuses OneDrive with the plain message (also reached by PrepareToInstall for /DIR=)")
+# public issue 20: [ ] ; in the install folder (and so the build folder {app}\\build) stop CMake while configuring
+m = re.search(r"function HasCMakeBadChar.*?\nend;", t, re.S)
+check(m and all(v in m.group(0) for v in ("'['", "']'", "';'")), "HasCMakeBadChar looks for [ ] and ;")
+m = re.search(r"function InstallDirProblem.*?\nend;", t, re.S)
+check(m and m.group(0).index("HasCMakeBadChar") < m.group(0).index("{#AppDirName}") and "cannot" in m.group(0) and
+      "none of" in m.group(0), "InstallDirProblem refuses them first, with the plain message (silent /DIR= too, via PrepareToInstall)")
+# issue 20 follow-up: a previous install folder with [ ] ; or gone is not proposed again
+m = re.search(r"procedure DropStalePreviousDir.*?\nend;", t, re.S)
+check(m and "HasCMakeBadChar(Prev)" in m.group(0) and "DirExists(Prev)" in m.group(0) and
+      "WizardForm.DirEdit.Text := ExpandConstant('{localappdata}\\Programs\\{#AppDirName}')" in m.group(0) and
+      "CompareText(RemoveBackslashUnlessRoot(WizardDirValue), Prev)" in m.group(0),
+      "DropStalePreviousDir proposes the default for a bad or missing previous folder, leaves typed and /DIR= folders alone")
+i, j = t.find("function HasCMakeBadChar"), t.find("procedure InitializeWizard;")
+check(0 < i < t.find("procedure DropStalePreviousDir") < j and "DropStalePreviousDir;" in t[j:j + 200] and
+      "(CurPageID = wpSelectDir) and (StaleDirNote = '')" in t, "defined before InitializeWizard, called there and on the dir page")
 sys.exit(1 if bad else 0)

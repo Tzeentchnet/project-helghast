@@ -96,11 +96,14 @@ RULES = [
     ("re/data/spu_map_114.tsv", "re/data/spu_map_114.tsv", "file", {}),
     ("re/data/spu_seeds_114.tsv", "re/data/spu_seeds_114.tsv", "file", {}),
     ("re/data/spu_coverage_seeds.tsv", "re/data/spu_coverage_seeds.tsv", "file", {}),
+    ("re/spu/native_gates.tsv", "re/spu/native_gates.tsv", "file", {}),
     # the per-version PPU lift tables firstrun.py picks by EBOOT version (overrides_file, fixups_file; tools/lift.sh's order)
     ("re/data/overrides/ppu_overrides-114.txt", "re/data/overrides/ppu_overrides-114.txt", "file", {}),
     ("re/data/overrides/ppu_lift_fixups-114.txt", "re/data/overrides/ppu_lift_fixups-114.txt", "file", {}),
     ("port/kz3", "port/kz3", "tree", {"skip_tests": True}),
     ("port/spu", "port/spu", "tree", {"skip_tests": True}),
+    # the port's own UI text per language: read at <exe dir>\lang\port_ui.tsv (kz3_tr.h; net 45); firstrun/launcher place it
+    ("port/text/port_ui.tsv", "lang/port_ui.tsv", "file", {}),
     ("port/vfs", "port/vfs", "tree", {"skip_tests": True}),
     ("port/net", "port/net", "tree", {"skip_tests": True}),   # Medius/NP client; CMakeLists ../net/*.c (pass 16)
     ("cmake", "cmake", "tree", {"include": ["*.cmake"]}),

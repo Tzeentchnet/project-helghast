@@ -87,8 +87,8 @@ index 2bbabde..3e45f79 100644
      } else {
          /*
           * H and M deliberately retain the complete legacy payload.  With an
-@@ -13488,6 +13482,17 @@ static int ld_h169_log_on(void)
-     return on;
+@@ -13848,6 +13842,17 @@ static void ld_tm_stat_print(void)
+     memset(&g_ld_tms, 0, sizeof g_ld_tms);
  }
  
 +static void ld_recycle_draw_rings(void)

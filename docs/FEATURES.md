@@ -12,7 +12,7 @@ What the PS3 version of Killzone 3 does and how far the port reproduces it (sect
 | declined | will not be done | 0 |
 | not applicable | has no equivalent on PC | 2 |
 
-Port-only features: 32 available now, 27 planned.
+Port-only features: 38 available now, 27 planned.
 
 **Estimated parity with the PS3 version: 65 %** (an estimate: works counts 1, partial 1/2, not yet verified 1/4, not yet 0; declined and not-applicable features are left out).
 
@@ -146,7 +146,7 @@ Non-original features are opt-in where they change gameplay; display and input i
 | Window modes and scaling (windowed, borderless, fullscreen, Alt+Enter, resizable, DPI aware) | available | on | Three modes (windowed, borderless, exclusive fullscreen as a setting), Alt+Enter, resizable window, Fit/Stretch and Bilinear/Nearest, Options > Display rows; host-tested and checked by hand under Proton at 1920x1080 (2026-10-21); DPI awareness not done |
 | Rebindable controls (every action, primary and secondary key, conflict warning, reset; saved to a local config file) | available | on | Keyboard page in the game's Options menus and keybinds.ini in the data folder; on-screen prompts show the bound keys when the keyboard is in use (pad glyphs again on a pad press); keyboard play confirmed by hand (2026-10-14); gamepad remap later |
 | Button prompts that follow the device in use (PlayStation, Xbox, keyboard/mouse), XInput rumble | available | auto | Glyphs drawn by the port in the game's own style; chosen on Options > Controls > Advanced Settings > Layout and Prompts |
-| Discord Rich Presence: “Playing Killzone 3” with the current chapter | available | off (opt-in) | Opt-in: Options > Display > Discord status, or the Start menu entry “Discord status on or off” (both saved as discord_presence in kz3.ini), through the local Discord app on your PC; nothing is sent when it is off. Built, host-tested (tools/net/test_discord.sh) and checked under Proton without the Discord app; the live check against the Discord app is still being tested |
+| Discord Rich Presence: “Playing Project Helghast” with the current chapter | available | off (opt-in) | Opt-in: Options > Display > Discord status, or the Start menu entry “Discord status on or off” (both saved as discord_presence in kz3.ini), through the local Discord app on your PC; nothing is sent when it is off. Built, host-tested (tools/net/test_discord.sh) and checked under Proton without the Discord app; the live check against the Discord app is still being tested |
 | Exit Game in the main menu (with a confirm prompt) | available | on | EXIT GAME under CREDITS with the game's own confirm dialog; a clean exit (dialog text in English only) |
 | Quit to desktop from the pause menu (with a confirm prompt) | available | on | QUIT TO DESKTOP under the game's Quit row in the campaign pause menu, with the game's own quit dialog; checked in the campaign, the multiplayer pause menu not yet |
 | The window title and the process name in Task Manager read Project Helghast, with the port's icon | available | on | Version info, icon and manifest in the exe; the title bar shows no debug numbers (KZ3_TITLE_STATS=1 adds them) |
@@ -170,6 +170,12 @@ Non-original features are opt-in where they change gameplay; display and input i
 | Option pages that match the game: descriptions for the port's rows in the game's tooltip panel, the Display list scrolling inside the game's list area, Reset to defaults covering the port's rows, and a menu pointer in the game's colours | available | on | Checked under Proton by screenshot; the pointer and the menu sounds still need a check by hand |
 | HUD, menus, subtitles and movies stay 16:9 and centred on wide, ultrawide and 16:10 screens while the 3D view fills the window (display.ini hud_169; no Options row yet) | available | default on | Checked at 32:9, 21:9, 16:10 and 16:9 in Frozen Shores; world markers (objective markers, name tags) project with the 16:9 view (bot name tags seen on target in Botzone at 32:9); the Botzone HUD shows one minimap at 16:9 and 32:9 in scripted runs; objective markers on screen not yet seen |
 | Opt-in crash reports to the project's error tracker | available | off | Installer Advanced page or the Start menu's “Crash reports on or off”. Sent by the launcher after a crash when you opt in: one report per session (reason, stack addresses, the last 200 log lines with user, machine, address, online-id and folder names removed), never the minidump. Host test test_crash_report.py; not yet sent to the real tracker from a release build |
+| Closing the window (X, Alt+F4, taskbar Close) asks first with the game's own quit dialog; Yes quits, No returns to the game | available | default on |  |
+| The window reopens at its last size and position on the same monitor (or centred on the main one if that monitor is gone) | available | default on |  |
+| Options > Display > When unfocused: keep running, mute the game, or open the pause menu while the window is in the background | available | default on |  |
+| Maximizing the window, or double-clicking its title bar, switches to borderless fullscreen | available | default on |  |
+| F11 switches between windowed and fullscreen, like Alt+Enter (unless F11 is bound to an action) | available | default on |  |
+| Window behaviour: close confirmation, remembered placement, background behaviour, maximize and F11 | available | default on |  |
 
 ### Planned
 

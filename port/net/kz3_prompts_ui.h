@@ -49,7 +49,7 @@ extern "C" int kz3_log_printf(const char* fmt, ...);
 #define KZ3_PADSET_OPEN "open(file:///common/kz3padsettings.gum)"
 
 static const char kz3_prompts_row[] =
-    "\n\t\t\t<listitem label=\"Layout and Prompts\" width=\"660\" labelaccept=\"@key{menu_legend_select}\"\n"
+    "\n\t\t\t<listitem label=\"@tr{lp.link|Layout and Prompts}\" width=\"660\" labelaccept=\"@key{menu_legend_select}\"\n"
     "\t\t\t\tonaccept=\"" KZ3_PADSET_OPEN "\"/>";
 
 /* The controller picture of the layout in force, shared by the port's page and the game's own controller page (net
@@ -132,6 +132,7 @@ static const char kz3_prompts_row[] =
     "\t\tend\n" \
     "\n" \
     "\t\tfunction KZ3ShowPicture(v)\n" \
+    "\t\t\tKZ3PicCmd(\"lang \"..gPlayerProfile:GetLanguage())\n" \
     "\t\t\tif v == nil then v = KZ3PicCmd(\"padmap\") end\n" \
     "\t\t\tgRoot:GetTag(\"pnl_kz3_ctl_default\"):SetVisible(v ~= \"modern\" and v ~= \"custom\")\n" \
     "\t\t\tgRoot:GetTag(\"pnl_kz3_ctl_modern\"):SetVisible(v == \"modern\")\n" \
@@ -158,6 +159,7 @@ static const char kz3_prompts_row[] =
  * right it covered the background emblem). Reset to defaults puts Button prompts on Auto and Controller layout on
  * Default (the game's pages offer one reset, to defaults, so there is no "reset to Modern" here). */
 #define KZ3_PADSET_DESC_Y "542"   /* tooltip panel y: first line just under "Look / Zoom", the second level with the legend */
+/* Net pass 45: a template (kz3_tr.h markers); kz3_padset_gum renders it in the game's language. */
 static const char kz3_padset_page[] =
     "<gum default-focus=\"lst_options\">\n"
     "\t<texture class=\"background\"/>\n"
@@ -166,24 +168,32 @@ static const char kz3_padset_page[] =
     "\t\toncancel=\"back()\" labelcancel=\"@key{menu_legend_back}\"\n"
     "\t\tonoptions=\"script(settingscript, SetToDefault)\" labeloptions=\"@key{menu_legend_default}\">\n"
     "\t\t@include{file:///hudelements/type3.gum}\n"
-    "\t\t<text class=\"pagetitle\">Change the controller layout and the button prompts</text>\n"
+    "\t\t<text class=\"pagetitle\">@tr{lp.title|Change the controller layout and the button prompts}</text>\n"
     "\t\t<text class=\"sectiontitle\">@key{menu_options}</text>\n"
     "\t\t<list id=\"lst_options\" class=\"PEDS\" width=\"800\" onchange=\"script(settingscript,ShowDescription)\">\n"
-    "\t\t\t<select id=\"slc_kz3_prompts\" width=\"555\" optionwidth=\"250\" label=\"Button prompts\" onchange=\"script(settingscript,KZ3ChangePrompts)\"\n"
+    "\t\t\t<select id=\"slc_kz3_prompts\" width=\"555\" optionwidth=\"250\" label=\"@tr{lp.prompts|Button prompts}\" onchange=\"script(settingscript,KZ3ChangePrompts)\"\n"
     "\t\t\t\tdefault-value=\"auto\">\n"
-    "\t\t\t\t<selectitem value=\"auto\">Auto</selectitem>\n"
-    "\t\t\t\t<selectitem value=\"ps3\">PS3</selectitem>\n"
-    "\t\t\t\t<selectitem value=\"ps4\">PS4/PS5</selectitem>\n"
-    "\t\t\t\t<selectitem value=\"xbox\">Xbox</selectitem>\n"
-    "\t\t\t\t<selectitem value=\"keyboard\">Keyboard</selectitem>\n"
+    "\t\t\t\t<selectitem value=\"auto\">@tr{lp.v.auto|Auto}</selectitem>\n"
+    "\t\t\t\t<selectitem value=\"ps3\">@tr{lp.v.ps3|PS3}</selectitem>\n"
+    "\t\t\t\t<selectitem value=\"ps4\">@tr{lp.v.ps4|PS4/PS5}</selectitem>\n"
+    "\t\t\t\t<selectitem value=\"xbox\">@tr{lp.v.xbox|Xbox}</selectitem>\n"
+    "\t\t\t\t<selectitem value=\"keyboard\">@tr{lp.v.keyboard|Keyboard}</selectitem>\n"
     "\t\t\t</select>\n"
-    "\t\t\t<select id=\"slc_kz3_layout\" width=\"555\" optionwidth=\"250\" label=\"Controller layout\" onchange=\"script(settingscript,KZ3ChangeLayout)\"\n"
+    "\t\t\t<select id=\"slc_kz3_layout\" width=\"555\" optionwidth=\"250\" label=\"@tr{lp.layout|Controller layout}\" onchange=\"script(settingscript,KZ3ChangeLayout)\"\n"
     "\t\t\t\tdefault-value=\"default\">\n"
-    "\t\t\t\t<selectitem value=\"default\">Default</selectitem>\n"
-    "\t\t\t\t<selectitem value=\"modern\">Modern shooter</selectitem>\n"
-    "\t\t\t\t<selectitem value=\"custom\">Custom</selectitem>\n"
+    "\t\t\t\t<selectitem value=\"default\">@tr{lp.v.default|Default}</selectitem>\n"
+    "\t\t\t\t<selectitem value=\"modern\">@tr{lp.v.modern|Modern shooter}</selectitem>\n"
+    "\t\t\t\t<selectitem value=\"custom\">@tr{lp.v.custom|Custom}</selectitem>\n"
     "\t\t\t</select>\n"
-    "\t\t\t<listitem id=\"itm_kz3_custom\" label=\"Edit custom layout\" width=\"320\" labelaccept=\"@key{menu_legend_select}\"\n"
+    "\t\t\t<select id=\"slc_kz3_dsu\" width=\"555\" optionwidth=\"250\" label=\"@tr{lp.dsu|Gyro server (DSU)}\" onchange=\"script(settingscript,KZ3ChangeDsu)\"\n"
+    "\t\t\t\tdefault-value=\"off\">\n"
+    "\t\t\t\t<selectitem value=\"off\">@tr{lp.v.off|Off}</selectitem>\n"
+    "\t\t\t\t<selectitem value=\"26760\">26760</selectitem>\n"
+    "\t\t\t\t<selectitem value=\"26761\">26761</selectitem>\n"
+    "\t\t\t\t<selectitem value=\"26762\">26762</selectitem>\n"
+    "\t\t\t\t<selectitem value=\"26763\">26763</selectitem>\n"
+    "\t\t\t</select>\n"
+    "\t\t\t<listitem id=\"itm_kz3_custom\" label=\"@tr{lp.edit|Edit custom layout}\" width=\"320\" labelaccept=\"@key{menu_legend_select}\"\n"
     "\t\t\t\tonaccept=\"" KZ3_PADPAGE_OPEN "\"/>\n"
     "\t\t</list>\n"
     KZ3_PIC_PANELS
@@ -197,9 +207,10 @@ static const char kz3_padset_page[] =
     "<![CDATA[\n"
     KZ3_PIC_LUA
     "\t\tgKz3Desc = {\n"
-    "\t\t\tslc_kz3_prompts = \"Which buttons the prompts show. Auto follows the controller or keyboard used last.\",\n"
-    "\t\t\tslc_kz3_layout = \"Modern is the Killzone Shadow Fall layout. Menus keep their buttons.\",\n"
-    "\t\t\titm_kz3_custom = \"Set the button for each action. A change selects the Custom layout.\"\n"
+    "\t\t\tslc_kz3_prompts = \"@trl{lp.tip.prompts|Which buttons the prompts show. Auto follows the controller or keyboard used last.}\",\n"
+    "\t\t\tslc_kz3_layout = \"@trl{lp.tip.layout|Modern is the Killzone Shadow Fall layout. Menus keep their buttons.}\",\n"
+    "\t\t\tslc_kz3_dsu = \"@trl{lp.tip.dsu|Gyro from a DSU server on this PC only (127.0.0.1). Pick its port; Off turns it off.}\",\n"
+    "\t\t\titm_kz3_custom = \"@trl{lp.tip.edit|Set the button for each action. A change selects the Custom layout.}\"\n"
     "\t\t}\n"
     "\n"
     "\t\tfunction KZ3PromptsCmd(c)\n"
@@ -210,6 +221,7 @@ static const char kz3_padset_page[] =
     "\t\t\tgRoot:GetTag(\"slc_kz3_prompts\"):SetValue(KZ3PromptsCmd(\"prompts\"))\n"
     "\t\t\tlocal v = KZ3PromptsCmd(\"padmap\")\n"
     "\t\t\tgRoot:GetTag(\"slc_kz3_layout\"):SetValue(v)\n"
+    "\t\t\tgRoot:GetTag(\"slc_kz3_dsu\"):SetValue(KZ3PromptsCmd(\"dsu\"))\n"
     "\t\t\tKZ3ShowPicture(v)\n"
     "\t\t\tgRoot:GetTag(\"txt_kz3_desc\"):SetValue(gKz3Desc[\"slc_kz3_prompts\"])\n"
     "\t\tend\n"
@@ -223,6 +235,11 @@ static const char kz3_padset_page[] =
     "\t\tfunction KZ3ChangePrompts(e)\n"
     "\t\t\te:SetHandled(true)\n"
     "\t\t\tKZ3PromptsCmd(\"prompts \"..e:GetSender():GetValue())\n"
+    "\t\tend\n"
+    "\n"
+    "\t\tfunction KZ3ChangeDsu(e)\n"
+    "\t\t\te:SetHandled(true)\n"
+    "\t\t\tKZ3PromptsCmd(\"dsu \"..e:GetSender():GetValue())\n"
     "\t\tend\n"
     "\n"
     "\t\tfunction KZ3ChangeLayout(e)\n"
@@ -240,6 +257,8 @@ static const char kz3_padset_page[] =
     "\t\t\tif (e:GetSender():GetValue() == \"yes\") then\n"
     "\t\t\t\tKZ3PromptsCmd(\"prompts auto\")\n"
     "\t\t\t\tKZ3PromptsCmd(\"padmap default\")\n"
+    "\t\t\t\tKZ3PromptsCmd(\"dsu off\")\n"
+    "\t\t\t\tgRoot:GetTag(\"slc_kz3_dsu\"):SetValue(\"off\")\n"
     "\t\t\t\tgRoot:GetTag(\"slc_kz3_prompts\"):SetValue(KZ3PromptsCmd(\"prompts\"))\n"
     "\t\t\t\tlocal v = KZ3PromptsCmd(\"padmap\")\n"
     "\t\t\t\tgRoot:GetTag(\"slc_kz3_layout\"):SetValue(v)\n"
@@ -249,6 +268,82 @@ static const char kz3_padset_page[] =
     "]]>\n"
     "\t</script>\n"
     "</gum>\n";
+/* The Layout and Prompts page in the game's language (malloc'd, NUL-terminated, *out_n bytes; NULL without memory). */
+/* Net pass 46: the label column and the description panel follow the language (a Russian or Spanish label is wider than
+ * the 305 px the English page leaves, and a long description needs more than the 3 lines of the right-hand column).
+ * kz3_pu_weight: width of a text in "Latin letters" (Cyrillic and similar 1.25, kana/Han/Hangul 2.2). */
+static double kz3_pu_weight(const char* s)
+{
+    double w = 0;
+    for (const unsigned char* p = (const unsigned char*)s; *p; p++) {
+        if (*p < 0x80) w += 1;
+        else if (*p >= 0xF0) { w += 2.2; p += 3; }
+        else if (*p >= 0xE0) { w += (*p >= 0xE3) ? 2.4 : 1.0; p += 2; }
+        else if (*p >= 0xC0) { w += (*p >= 0xD0) ? 1.25 : 1.0; p += 1; }
+    }
+    return w;
+}
+
+/* replace every `from` in the rendered page (malloc'd *g, *n bytes) with `to`; returns the number of replacements */
+static int kz3_pu_replace(char** g, size_t* n, const char* from, const char* to)
+{
+    size_t fl = strlen(from), tl = strlen(to);
+    int hits = 0;
+    for (size_t i = 0; i + fl <= *n; ) {
+        if (memcmp(*g + i, from, fl)) { i++; continue; }
+        char* r = (char*)malloc(*n - fl + tl + 1);
+        if (!r) return hits;
+        memcpy(r, *g, i); memcpy(r + i, to, tl); memcpy(r + i + tl, *g + i + fl, *n - i - fl);
+        *n = *n - fl + tl; r[*n] = 0;
+        free(*g); *g = r; i += tl; hits++;
+    }
+    return hits;
+}
+
+static char* kz3_padset_gum(size_t* out_n)
+{
+    char* g = NULL;
+    size_t n = kz3_tr_render(kz3_padset_page, sizeof kz3_padset_page - 1, &g);
+    if (!g) { *out_n = n; return g; }
+    /* label column: 14.5 px per Latin capital plus the row's left padding; never below the English 305 px */
+    double lw = kz3_pu_weight(kz3_tr("lp.prompts", "Button prompts"));
+    double l2 = kz3_pu_weight(kz3_tr("lp.layout", "Controller layout"));
+    double l3 = kz3_pu_weight(kz3_tr("lp.edit", "Edit custom layout"));
+    double l5 = kz3_pu_weight(kz3_tr("lp.dsu", "Gyro server (DSU)"));
+    if (l2 > lw) lw = l2;
+    if (l5 > lw) lw = l5;
+    int label = (int)(lw * 14.5 + 50);
+    if (label < 305) label = 305;
+    int width = label + 250;
+    if (width > 555) {
+        char a[64], b[64];
+        snprintf(a, sizeof a, "width=\"%d\" optionwidth=\"250\"", width);
+        kz3_pu_replace(&g, &n, "width=\"555\" optionwidth=\"250\"", a);
+        if (width > 800) {
+            snprintf(b, sizeof b, "class=\"PEDS\" width=\"%d\"", width + 20);
+            kz3_pu_replace(&g, &n, "class=\"PEDS\" width=\"800\"", b);
+        }
+    }
+    int ew = (int)(l3 * 14.5 + 40);   /* the Edit row: its own width (320 px in English) */
+    if (ew > 320) {
+        char b[64];
+        snprintf(b, sizeof b, "width=\"%d\" labelaccept", ew);
+        kz3_pu_replace(&g, &n, "width=\"320\" labelaccept", b);
+    }
+    /* description panel: the right-hand column holds 3 lines; a longer text moves the panel left and widens it */
+    double d = kz3_pu_weight(kz3_tr("lp.tip.prompts", "Which buttons the prompts show. Auto follows the controller or keyboard used last."));
+    double d2 = kz3_pu_weight(kz3_tr("lp.tip.layout", "Modern is the Killzone Shadow Fall layout. Menus keep their buttons."));
+    double d3 = kz3_pu_weight(kz3_tr("lp.tip.edit", "Set the button for each action. A change selects the Custom layout."));
+    if (d2 > d) d = d2;
+    if (d3 > d) d = d3;
+    { double d5 = kz3_pu_weight(kz3_tr("lp.tip.dsu", "Gyro from a DSU server on this PC only (127.0.0.1). Pick its port; Off turns it off."));
+      if (d5 > d) d = d5; }
+    if (d > 90)
+        kz3_pu_replace(&g, &n, "class=\"tooltip\" y=\"" KZ3_PADSET_DESC_Y "\"", "class=\"tooltip\" x=\"45\" width=\"780\" y=\"" KZ3_PADSET_DESC_Y "\"");
+    *out_n = n;
+    return g;
+}
+
 static const char* kz3_pu_find(const char* h, size_t n, size_t from, const char* needle)
 {
     size_t k = strlen(needle);
@@ -270,14 +365,16 @@ static char* kz3_prompts_patch_gum(const char* in, size_t n, size_t* out_n)
     while (at_row > (size_t)(list - in) && (in[at_row - 1] == ' ' || in[at_row - 1] == '\t' || in[at_row - 1] == '\r' ||
                                             in[at_row - 1] == '\n'))
         at_row--;
-    const size_t nr = sizeof kz3_prompts_row - 1;
-    char* out = (char*)malloc(n + nr + 1);
-    if (!out) return NULL;
+    char* row = NULL;
+    const size_t nr = kz3_tr_render(kz3_prompts_row, sizeof kz3_prompts_row - 1, &row);   /* network pass 45 */
+    char* out = row ? (char*)malloc(n + nr + 1) : NULL;
+    if (!out) { free(row); return NULL; }
     memcpy(out, in, at_row);
-    memcpy(out + at_row, kz3_prompts_row, nr);
+    memcpy(out + at_row, row, nr);
     memcpy(out + at_row + nr, in + at_row, n - at_row);
     out[n + nr] = 0;
     *out_n = n + nr;
+    free(row);
     return out;
 }
 
@@ -400,13 +497,27 @@ static void kz3_pu_dir(char* dir, size_t cap)    /* <vfs root>/psarc-cache/kz3-u
 
 static char s_pp_out[1100], s_pp2_out[1100];   /* the Custom pages' host paths (patches 4014, 4023) */
 static int  s_pp_state, s_pp2_state;           /* 0 not tried, 1 written, -1 not written */
+static int  s_pp_lang, s_pp2_lang;             /* network pass 45: the language a page was written in */
+
+/* Net pass 45: a page written in another language than the one in force is generated again (the game re-reads a
+ * page at each open, so the change shows at the next open). */
+static void kz3_pu_relang(int* state, int* lang)
+{
+    int now = kz3_tr_lang();
+    if (*state != 0 && *lang != now) {
+        if (*state == 1) KZ3_NET_PRINTF("[prompts] language %d -> %d: page generated again\n", *lang, now);
+        *state = 0;
+    }
+    *lang = now;
+}
 
 /* Serve a generated Custom page (not in the archive: written on its first miss): padlayoutsettings.gum (on foot)
  * and kz3padlayout2.gum (vehicles, exo, guns; network pass 40). */
-static void kz3_pp_serve(char* path, size_t cap, char* (*gen)(size_t*), int* state, char* outp, size_t outcap,
+static void kz3_pp_serve(char* path, size_t cap, char* (*gen)(size_t*), int* state, int* lang, char* outp, size_t outcap,
                          const char* file, const char* what)
 {
     kz3_pu_lock();
+    kz3_pu_relang(state, lang);
     if (*state == 0) {
         size_t n = 0;
         char* g = gen(&n);
@@ -431,12 +542,12 @@ static void kz3_pp_serve(char* path, size_t cap, char* (*gen)(size_t*), int* sta
 }
 static void kz3_padpage_serve(char* path, size_t cap)
 {
-    kz3_pp_serve(path, cap, kz3_padpage_gum, &s_pp_state, s_pp_out, sizeof s_pp_out, "padlayoutsettings.gum",
+    kz3_pp_serve(path, cap, kz3_padpage_gum, &s_pp_state, &s_pp_lang, s_pp_out, sizeof s_pp_out, "padlayoutsettings.gum",
                  "Custom layout page");
 }
 static void kz3_padpage2_serve(char* path, size_t cap)
 {
-    kz3_pp_serve(path, cap, kz3_padpage2_gum, &s_pp2_state, s_pp2_out, sizeof s_pp2_out, "kz3padlayout2.gum",
+    kz3_pp_serve(path, cap, kz3_padpage2_gum, &s_pp2_state, &s_pp2_lang, s_pp2_out, sizeof s_pp2_out, "kz3padlayout2.gum",
                  "Custom layout page (vehicles, exo, guns)");
 }
 
@@ -446,17 +557,21 @@ static int  s_ps_state;              /* 0 not tried, 1 written, -1 not written *
 /* Serve interface/menu/gum/common/kz3padsettings.gum (not in the archive: written on its first miss). */
 static void kz3_padset_serve(char* path, size_t cap)
 {
+    static int lang;
     kz3_pu_lock();
+    kz3_pu_relang(&s_ps_state, &lang);
     if (s_ps_state == 0) {
-        const size_t n = sizeof kz3_padset_page - 1;
+        size_t n = 0;
+        char* g = kz3_padset_gum(&n);
         char dir[1000];
         FILE* o;
         int ok;
         kz3_pu_dir(dir, sizeof dir);
         snprintf(s_ps_out, sizeof s_ps_out, "%s/kz3padsettings.gum", dir);
-        o = fopen(s_ps_out, "wb");
-        ok = o && fwrite(kz3_padset_page, 1, n, o) == n;
+        o = g ? fopen(s_ps_out, "wb") : NULL;
+        ok = o && fwrite(g, 1, n, o) == n;
         if (o) ok = (fclose(o) == 0) && ok;
+        free(g);
         s_ps_state = ok ? 1 : -1;
         KZ3_NET_PRINTF("[prompts] Layout and Prompts page %s (%zu bytes)\n", ok ? "written" : "NOT written", n);
         fflush(stdout);
@@ -472,10 +587,11 @@ static int  s_pc_state;              /* 0 not tried, 1 written, -1 served unchan
 
 /* Serve an archive page patched by fn: the first open reads the page the chain behind this hook serves, writes the
  * patched copy to psarc-cache/kz3-ui/<file> and serves it from then on; unchanged when fn refuses or the write fails. */
-static void kz3_pu_patch_serve(char* path, size_t cap, int* state, char* outp, size_t outcap, const char* file,
+static void kz3_pu_patch_serve(char* path, size_t cap, int* state, int* lang, char* outp, size_t outcap, const char* file,
                                Kz3PuPatchFn fn, const char* what)
 {
     kz3_pu_lock();
+    kz3_pu_relang(state, lang);
     if (*state == 0) {
         char src[1100];
         snprintf(src, sizeof src, "%s", path);
@@ -524,6 +640,7 @@ static void kz3_pu_patch_serve(char* path, size_t cap, int* state, char* outp, s
  * of the page main.cpp serves (the hook behind this one: patch 2095/2110's rows, tooltip panel and Lua). */
 #include "kz3_discord.h"
 static char s_pd_out[1100];
+static int  s_pd_lang, s_pc_lang, s_pu_lang;   /* network pass 45: language of each patched page */
 static int  s_pd_state;              /* 0 not tried, 1 written, -1 served as main.cpp serves it */
 
 static void kz3_prompts_miss_hook(char* path, size_t cap)
@@ -538,19 +655,19 @@ static void kz3_prompts_miss_hook(char* path, size_t cap)
     if (u && !strcmp(u + 7, KZ3_PADSET_KEY)) { kz3_padset_serve(path, cap); return; }
     if (u && !strcmp(u + 7, KZ3_PROMPTS_GUM_KEY)) {
         kz3_host_composed_check(KZ3_PROMPTS_GUM_KEY, "the prompts row");   /* net 40: one-place list */
-        kz3_pu_patch_serve(path, cap, &s_pu_state, s_pu_out, sizeof s_pu_out, "advancedcontroller.gum",
+        kz3_pu_patch_serve(path, cap, &s_pu_state, &s_pu_lang, s_pu_out, sizeof s_pu_out, "advancedcontroller.gum",
                            kz3_prompts_patch_gum, "Layout and Prompts row");
         return;
     }
     if (u && !strcmp(u + 7, KZ3_HC_DISPLAY)) {
         kz3_host_composed_check(KZ3_HC_DISPLAY, "the Discord status row");
-        kz3_pu_patch_serve(path, cap, &s_pd_state, s_pd_out, sizeof s_pd_out, "displaysettings-net.gum",
+        kz3_pu_patch_serve(path, cap, &s_pd_state, &s_pd_lang, s_pd_out, sizeof s_pd_out, "displaysettings-net.gum",
                            kd_patch_display_gum, "Discord status row");
         return;
     }
     if (u && !strcmp(u + 7, KZ3_CTL_GUM_KEY)) {
         kz3_host_composed_check(KZ3_CTL_GUM_KEY, "the controller picture");
-        kz3_pu_patch_serve(path, cap, &s_pc_state, s_pc_out, sizeof s_pc_out, "controllersettings.gum",
+        kz3_pu_patch_serve(path, cap, &s_pc_state, &s_pc_lang, s_pc_out, sizeof s_pc_out, "controllersettings.gum",
                            kz3_ctl_patch_gum, "picture of the layout in force");
         return;
     }
