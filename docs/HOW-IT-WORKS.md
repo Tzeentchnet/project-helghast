@@ -69,7 +69,10 @@ graphics, 3xxx lifter and system-library fixes, 5xxx data, update and trophy sup
   read-modify-writes racing the SPUs);
 - MinGW-specific problems (thread-local variables, slow emulated TLS on hot paths);
 - renderer features the game uses (per-unit samplers, texture gamma, float and depth formats, conditional rendering
-  with occlusion queries, buffer copies and write-backs).
+  with occlusion queries, buffer copies and write-backs);
+- an opt-in **ENHANCEMENT** path that feeds validated deferred depth, camera-derived motion, and a generated
+  responsive-pixel mask into Intel XeSS Super Resolution, with Bilinear fallback. Architecture and limitations:
+  [XESS.md](XESS.md).
 
 Each runtime fix comes with a focused host test in `tools/upstream/`, `tools/smoke/` or `tools/spu/` that shows the
 bug on the unpatched code and its cure on the patched code.

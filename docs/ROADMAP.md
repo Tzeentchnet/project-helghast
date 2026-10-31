@@ -31,7 +31,11 @@ Where each feature of the PS3 game stands today, and the port-only features with
 - 📋 Variable refresh rate, low-latency mode
 - 📋 60 fps and above (opt-in where it would change gameplay)
 - 📋 Motion blur strength setting (needs a clean way to switch the game's blur pass)
-- 📋 Temporal anti-aliasing and upscaling (TAA, DLAA, DLSS, FSR), after the Windows build matches the console
+- 🔧 Experimental XeSS Super Resolution path: deferred depth, camera motion, jitter, and a responsive-pixel mask are
+  implemented for testing and native gameplay dispatch is validated; broader image-quality and hardware testing,
+  object motion, and UI separation remain
+- 📋 Broader temporal anti-aliasing and upscaling work (TAA, DLAA, DLSS, FSR) after the experimental XeSS path and
+  Windows renderer are validated
 - 📋 Ray-traced sun shadows, then ambient occlusion and reflections (off by default)
 - 🔧 A settings menu in the game's own UI style (the Display and Mouse pages exist; more pages to come)
 

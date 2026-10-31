@@ -178,6 +178,17 @@ add_executable(${PROJECT_NAME}
     ${SPU_SOURCES}
 )
 
+# ENHANCEMENT: XeSS-SR is loaded only from the pinned Intel DLL shipped beside
+# the executable. The port owns the adapter and ps3recomp remains dependency
+# free for every other game.
+if(WIN32)
+    target_sources(${PROJECT_NAME} PRIVATE xess.cpp)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE KZ3_XESS)
+    target_compile_definitions(ps3recomp_runtime PRIVATE KZ3_XESS)
+    target_include_directories(
+        ps3recomp_runtime PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+endif()
+
 # KZ3 release: the player's EBOOT.elf linked into kz3.exe. The release's first-run build
 # (tools/release/firstrun.py) passes -DKZ3_EMBED_EBOOT=<the EBOOT.elf it lifted>; kz3_eboot_blob.c carries its bytes
 # and the SHA-256 taken here, which main.cpp checks before loading them (kz3_embed.h). The exe is built on the
@@ -323,6 +334,9 @@ if(KZ3_LOG_REDIRECT)
     target_compile_definitions(ps3recomp_runtime PRIVATE KZ3_LOG_REDIRECT_STDIO)
     target_compile_options(ps3recomp_runtime PRIVATE -include "${KZ3_LOG_HEADER}")
     set(KZ3_REDIRECTED main.cpp stubs.cpp psarc_vfs.cpp hle_kz3.cpp ${PS3RECOMP_SCAFFOLD})
+    if(WIN32)
+        list(APPEND KZ3_REDIRECTED xess.cpp)
+    endif()
     set_property(SOURCE ${KZ3_REDIRECTED} APPEND PROPERTY COMPILE_DEFINITIONS KZ3_LOG_REDIRECT_STDIO)
     set_property(SOURCE ${KZ3_REDIRECTED} APPEND PROPERTY COMPILE_OPTIONS -include "${KZ3_LOG_HEADER}")
 endif()
