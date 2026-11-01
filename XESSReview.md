@@ -1,6 +1,6 @@
 # XeSS-SR review: branch `xesstest`
 
-Commits `05c978d` and `085d371` against `main`, reviewed 2026-10-31. The review read the adapter, patch 2139, the
+Commits `05c978d` and `085d371` against `main`, reviewed 2026-10-31. The review read the adapter, patch 2142, the
 renderer code around it, the release tooling and Intel's SDK 3.0.2 headers and developer guide, then ran the tests
 and a black-box probe on an RTX 5070 (driver 617.42). The game was not run, so in-game behaviour here comes from
 reading the code. No code was changed by the review itself.
@@ -32,7 +32,7 @@ Five items should be fixed before merge. All are small except F3.
 - **Read**: established from the code. The path is deterministic, but it was not observed in a game run.
 - **Inferred**: a likely consequence that still needs a run to confirm.
 
-Renderer references point into [patch 2139](port/patches/2139-xess-super-resolution.patch) where the code is new, and
+Renderer references point into [patch 2142](port/patches/2142-xess-super-resolution.patch) where the code is new, and
 otherwise name the function in `libs/video/rsx_live_draw.c` of the patched toolkit.
 
 ## Must fix before merge
@@ -43,7 +43,7 @@ otherwise name the function in `libs/video/rsx_live_draw.c` of the patched toolk
 ([kz3_ppu_overrides.cpp:866](port/spu/kz3_ppu_overrides.cpp#L866), active on 1.14 through
 [ppu_overrides-114.txt:10](re/data/overrides/ppu_overrides-114.txt#L10)). The patch then calls `ld_host_aa(i)`
 unconditionally, straight after the pre-upscale capture
-([patch line 572](port/patches/2139-xess-super-resolution.patch#L572)).
+([patch line 572](port/patches/2142-xess-super-resolution.patch#L572)).
 
 Every XeSS frame therefore gets a spatial edge filter on its jittered samples before the temporal solve. FXAA responds
 differently at each jitter phase, so it softens edges and adds frame-to-frame variation that XeSS has to treat as
@@ -68,7 +68,7 @@ level. `docs/XESS.md` does not list this.
 
 `kz3_xess_get_camera` returns the last coherent state however old it is
 ([xess.cpp:1262](port/kz3/xess.cpp#L1262)). The renderer's only check is
-`g_xess_camera_frame != g_ld_frames` ([patch line 641](port/patches/2139-xess-super-resolution.patch#L641)), which
+`g_xess_camera_frame != g_ld_frames` ([patch line 641](port/patches/2142-xess-super-resolution.patch#L641)), which
 proves a snapshot was taken this frame, not that the snapshot is new. `camera.guest_flip` is never compared with
 anything. `docs/XESS.md` line 239 lists a stale camera as a fallback condition, but no such check exists.
 
@@ -95,7 +95,7 @@ Which of these occur in practice is unknown, because no log records the offset.
 `docs/XESS.md` says the renderer "logs the reason". For the main failure cases it logs the wrong one:
 
 1. `ld_xess_draw_jitter` calls `ld_xess_ensure_context` at the first deferred draw. On failure it returns with
-   `g_xess_camera_frame` still `UINT32_MAX` ([patch lines 330-361](port/patches/2139-xess-super-resolution.patch#L330)).
+   `g_xess_camera_frame` still `UINT32_MAX` ([patch lines 330-361](port/patches/2142-xess-super-resolution.patch#L330)).
 2. `ld_xess_present` reaches the camera check first and reports
    `no coherent single-view camera and projection are available`.
 3. The `XESS_BYPASS_CONTEXT` branch that would print `kz3_xess_status()` is reachable only if the draw-time init worked
@@ -141,7 +141,7 @@ HUD. The known-issues list mentions only the HUD.
 
 The HUD is worse off than the docs suggest. Its pixels receive motion reconstructed from the depth behind them, so
 static text is reprojected as if it were world-locked. The responsive mask does not help, because its final capture
-happens at the NV0039 scene copy, before FXAA, post and HUD ([patch lines 536-573](port/patches/2139-xess-super-resolution.patch#L536)).
+happens at the NV0039 scene copy, before FXAA, post and HUD ([patch lines 536-573](port/patches/2142-xess-super-resolution.patch#L536)).
 The phrase "immediately before temporal presentation" (XESS.md lines 57 and 160) is therefore inaccurate.
 
 **Fix, cheap step first:** patch 2113 already identifies the compose draw (`compose = first && g_h169_depth_seen`).
@@ -228,7 +228,7 @@ from that branch.
 | M1 | `ld_gamma_present_resource` sizes the shared `g_aa_tex` to the XeSS output while FXAA needs 1280x720 | With non-default Brightness it is recreated twice a frame (Measured: 1.2 ms). Fixing F1 removes it |
 | M2 | The depth SRV is rewritten in one heap slot every frame with two frames in flight ([xess.cpp:1452](port/kz3/xess.cpp#L1452)) | Benign while the resource is unchanged, but a D3D12 rule violation. Write it only when the resource changes |
 | M3 | Depth is resolved at present, not at the end of the scene | A later write to that zeta would feed XeSS the wrong depth. Whether the game does this needs a run |
-| M4 | A 250 ms hitch resets history ([patch line 682](port/patches/2139-xess-super-resolution.patch#L682)) | Game time is frame-locked, so a hitch does not invalidate history. `frame_ms` has no other use |
+| M4 | A 250 ms hitch resets history ([patch line 682](port/patches/2142-xess-super-resolution.patch#L682)) | Game time is frame-locked, so a hitch does not invalidate history. `frame_ms` has no other use |
 | M5 | Jitter phases clamp to 64; Intel's rule gives 72 at 3x | Only reached near 4K output |
 | M6 | `xessIsOptimalDriver` goes only to stderr | Intel asks for a notice to the user |
 | M7 | The Native AA branch is unreachable | The renderer requires output larger than input |
@@ -359,7 +359,7 @@ an image-quality fix.
 
 ### What changed
 
-The renderer changes are in a new patch, [2140](port/patches/2140-xess-review-fixes.patch), because `AGENTS.md` asks for a
+The renderer changes are in a new patch, [2143](port/patches/2143-xess-review-fixes.patch), because `AGENTS.md` asks for a
 new numbered patch and it can be dropped on its own terms: revert the commit as a whole, because the adapter API changed
 with it.
 
@@ -376,7 +376,7 @@ with it.
 | F9 VC++ runtime | Done | `requirements.md` and `XESS.md` updated; the load failure names the redistributable when the DLL exists but a dependency does not |
 | F10 Re-init | Done | The present path flushes first. A new `kz3_xess_would_recreate` replaces the `g_xess_context_w` test, so the skipped wait after a failed init is gone too |
 | F11 Licence bytes | Done | `-text` in `.gitattributes`; the blobs now hash to the pins |
-| F12 `fsrtest` | Partly | The `"fsr31"` test string is restored. Renumbering is left for merge time: this adds 2140, which `fsrtest` also uses |
+| F12 `fsrtest` | Done for numbering | The `"fsr31"` test string is restored. At the GPU-integration merge, GPU patches kept 2139-2141 and the XeSS pair moved to 2142-2143, so it no longer occupies the FSR patch numbers |
 | F13 Coverage | Partly | Camera logic moved to `xess_camera.h` with a host test; GPU tests now read back mask and motion contents; temporal sign test added; handedness logged once. Not done: CI compiling `xess.cpp`, see below |
 | M1 `g_aa_tex` | Done by F1 | FXAA and XeSS no longer alternate its size |
 | M2, M3 Depth | Done | Depth is copied to an adapter texture at the scene copy, so no descriptor is rewritten per frame and later zeta writes cannot reach XeSS |
@@ -430,9 +430,14 @@ On Windows, RTX 5070, driver 617.42, g++ 16 from WinLibs.
 | Native gameplay, normal jitter and HUD mask on | XeSS dispatches 1280x720 to 1920x1080 with generated responsive/HUD masks and mip bias -0.586; camera basis +1.000; 600 dispatches / 4 resets after the pairing correction; constant small whole-scene jitter remains |
 | Native gameplay, `KZ3_XESS_HUD_MASK=0` | Whole-scene jitter is unchanged. The HUD remains visible, as expected: this switch disables its mask, not HUD drawing |
 | Temporary diagnostic build with projection and execute jitter forced to zero | XeSS remains active with depth, motion and the scene responsive mask; the whole-scene jitter disappears |
+| GPU integration plus XeSS, all 295 patches from the pinned commit | Apply. GPU patches 2139-2141 precede the regenerated XeSS patches 2142-2143; the XeSS pair applies to that exact base without whitespace relaxation |
+| Combined focused host checks | `test_display_mode`, all XeSS host tests, `test_vtx_gpu`, `test_vtx_dev`, `test_wb_gpu`, native gates, XeSS/release payload tests, UI table, and generated features pass |
+| Combined hardware checks on the RTX 5070 | The shared D3D12 GPU-offload test and the complete `test_xess.ps1` dispatch, temporal, re-init, readback, and fallback checks pass |
 
 Not run:
 
+- a native game build or gameplay run after the GPU integration merge; the gameplay results above are from the
+  pre-merge XeSS toolkit
 - the D3D12 debug layer (the optional Windows Graphics Tools feature is not installed here, so the new barriers are
   checked by reading and clean GPU runs only)
 - Proton
@@ -443,8 +448,9 @@ Not run:
 
 ### Gameplay result and remaining test plan
 
-The full 292-patch toolkit was regenerated before the native build. The normal temporal path now reaches gameplay, but
-it is not visually stable: a small constant whole-scene jitter remains. Turning the HUD mask off did not change it.
+The then-complete 292-patch XeSS toolkit was regenerated before the pre-GPU-merge native build. The normal temporal
+path reaches gameplay, but it is not visually stable: a small constant whole-scene jitter remains. Turning the HUD
+mask off did not change it.
 Forcing both the game projection jitter and the jitter supplied to XeSS to zero removed it, while XeSS continued to
 dispatch. That diagnostic was temporary and is not a proposed final mode; it isolates the next investigation to the
 actual game projection displacement, the value/sign/scale supplied to XeSS, or inconsistent jitter coverage across

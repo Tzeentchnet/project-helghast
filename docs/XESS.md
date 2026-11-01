@@ -93,8 +93,8 @@ Any missing, unsupported, or incoherent input
 | [`port/kz3/xess_camera.h`](../port/kz3/xess_camera.h) | Platform-independent camera bridge, flip pairing, and freshness rules |
 | [`port/kz3/xess_inputs.h`](../port/kz3/xess_inputs.h) | Pure deferred-pass, scene-resolve, jitter, capture-pair, aspect, and mip-bias rules |
 | [`port/kz3/main.cpp`](../port/kz3/main.cpp) | Camera, FOV, and projection-plane publication |
-| [`port/patches/2139-xess-super-resolution.patch`](../port/patches/2139-xess-super-resolution.patch) | Renderer integration, input selection, presentation ordering, UI, and fallback |
-| [`port/patches/2140-xess-review-fixes.patch`](../port/patches/2140-xess-review-fixes.patch) | Fixes from [the review](../XESSReview.md): FXAA, mip bias, camera pairing, failure reporting, HUD mask, re-init safety |
+| [`port/patches/2142-xess-super-resolution.patch`](../port/patches/2142-xess-super-resolution.patch) | Renderer integration, input selection, presentation ordering, UI, and fallback |
+| [`port/patches/2143-xess-review-fixes.patch`](../port/patches/2143-xess-review-fixes.patch) | Fixes from [the review](../XESSReview.md): FXAA, mip bias, camera pairing, failure reporting, HUD mask, re-init safety |
 | [`tools/release/stage_xess.py`](../tools/release/stage_xess.py) | Release-time validation and staging of Intel's unmodified runtime and required notices |
 | [`tools/smoke/test_xess.cpp`](../tools/smoke/test_xess.cpp) | Native D3D12 context, dispatch, mask and motion contents, readback, and fallback smoke test |
 | [`tools/smoke/test_xess_temporal.cpp`](../tools/smoke/test_xess_temporal.cpp) | Native check that XeSS reconstructs with the port's jitter and motion conventions |
@@ -319,15 +319,24 @@ Validation that needs no game data:
 - the native temporal test feeds a moving scene for 64 frames and checks that the port's jitter and motion conventions
   reconstruct, that the NDC path matches pixel-unit motion, and that flipped axes do not.
 
+The GPU-offload integration keeps patches 2139-2141 ahead of XeSS patches 2142-2143. On 2026-10-31, all 295 patches
+applied from the pinned ps3recomp commit, including the regenerated XeSS pair against that exact GPU-patched base. The
+shared draw tail retains GPU-fetch submission accounting before query completion and performs XeSS scene captures
+after it; shutdown drains the list, releases GPU writeback resources, and then releases XeSS. The focused XeSS, vertex
+GPU, vertex-device, writeback GPU, native-gate, release, localization, and generated-feature tests passed. On an
+NVIDIA RTX 5070, both the shared D3D12 GPU-offload test and the XeSS dispatch, temporal, re-init, mask/motion readback,
+and runtime-fallback tests passed. The combined game executable has not yet been rebuilt or run; the gameplay evidence
+below predates the GPU merge.
+
 Native Windows gameplay validation on 2026-10-31 used the hardware D3D12 path on an NVIDIA RTX 5070, a 1280x720
-game image, a 1920x1080 Fit output, and `KZ3_DISPLAY_FILTER=xess`. Before patch 2140, the log showed:
+game image, a 1920x1080 Fit output, and `KZ3_DISPLAY_FILTER=xess`. Before review-fix patch 2143, the log showed:
 
 - XeSS-SR API 2.0.2 dispatching 1280x720 to 1920x1080;
 - matched opaque and opaque-plus-translucent captures with the generated responsive mask;
 - 600 dispatches with 11 history resets during startup and camera transitions; and
 - no XeSS fallback after the pre-scene frame, dispatch failure, or device removal.
 
-Patch 2140 was then built with the complete 292-patch toolkit and run in the same native configuration. Its first game
+Patch 2143 was then built with the then-complete 292-patch toolkit and run in the same native configuration. Its first game
 run exposed a camera-pairing call-site error: the FIFO-only flip counter used for calibration stayed zero. The requested
 flip consequently froze, the 16-state ring missed 600 times, and the first 600 dispatches had 43 resets. Pairing now
 uses the renderer frame counter, which advances on every KZ3 presentation. After that correction:
