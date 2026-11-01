@@ -352,9 +352,10 @@ caches, so a clean machine could be slower. That init runs on the frame thread, 
 
 ## Fix record
 
-Made 2026-10-31 in the commits after `2c4fa7a`, on `xesstest`, not pushed. Everything below passed the host and GPU tests
-listed here, but **none of it has run in the game**. Image quality and the behaviour of the game-facing parts are still
-unknown until the test plan is done. The in-game results in `docs/XESS.md` predate these changes.
+Made 2026-10-31 in the commits after `2c4fa7a`, on `xesstest`, not pushed. The host and GPU tests passed before the
+game run. Native gameplay testing later found and fixed a camera-pairing call-site bug, then isolated a remaining
+whole-scene jitter to the projection/execute jitter path. The branch is still experimental and is not ready to push as
+an image-quality fix.
 
 ### What changed
 
@@ -366,10 +367,10 @@ with it.
 |---|---|---|
 | F1 FXAA | Done | `ld_host_aa` is skipped on frames that were actually jittered. Frames outside XeSS keep FXAA |
 | F2 Mip bias | Done | `log2(input / target)` added to units with a mip chain on jittered draws. The jitter decision moved ahead of sampler table construction. `KZ3_XESS_MIP_BIAS` overrides it |
-| F3 Camera | Done, differently | See [Decisions](#decisions). Flip ring, self-calibrating pairing, same-flip and skipped-flip checks, `[xess] camera pairing` log lines, `KZ3_XESS_CAMERA_LAG` |
+| F3 Camera | Done after game correction | See [Decisions](#decisions). Flip ring, self-calibrating pairing against the renderer frame counter, same-flip and skipped-flip checks, `[xess] camera pairing` log lines, `KZ3_XESS_CAMERA_LAG` |
 | F4 Failure reason | Done, except one part | A draw-time init failure reports `kz3_xess_status()` before the camera check, and failures are latched per device and size. Not done: showing the fallback on the Options row |
 | F5 Project rules | Done | `ENHANCEMENT:`, `ASSUMPTION:` and `@0x` comments added; `scene_lr` checked for a preceding call; `features.tsv` updated with a new XeSS row and `FEATURES.md` regenerated |
-| F6 After post and HUD | Partly | The HUD mask is done: compose capture, zero motion and mask 1.0 on HUD pixels, `KZ3_XESS_HUD_MASK`. XeSS still runs after tone-mapping and post; moving it is the long-term work |
+| F6 After post and HUD | Partly, game-tested | The HUD mask is done: compose capture, zero motion and mask 1.0 on HUD pixels, `KZ3_XESS_HUD_MASK`. Disabling the mask did not change the measured whole-scene jitter. XeSS still runs after tone-mapping and post; moving it is the long-term work |
 | F7 Jitter in fallback | Done | A jittered frame that falls back holds jitter off, and the following frames go through XeSS unjittered until one succeeds |
 | F8 Aspect check | Done | One output pixel of tolerance. 1360x768 and 1920x1200 stay refused |
 | F9 VC++ runtime | Done | `requirements.md` and `XESS.md` updated; the load failure names the redistributable when the DLL exists but a dependency does not |
@@ -391,10 +392,12 @@ with it.
 ### Decisions
 
 - **F3 goes further than the review's order.** The review said to measure the flip offset in a run first. A fixed offset
-  would have been a guess, and getting the counters' base wrong could have disabled XeSS altogether, so the offset is
-  measured live: a frame's own camera is published before its draws, so the smallest `latest - consumed` over a window is
-  the true offset. It cannot do worse than the old "take the latest" unless the window's minimum is itself wrong, and
-  `KZ3_XESS_CAMERA_LAG=-1` restores the old behaviour exactly.
+  would have been a guess, so the offset is measured live. The first game run exposed that the proposed FIFO-only
+  `g_ld_flip_consumed` counter stays zero on KZ3's active presentation path. That froze the requested flip, caused 600
+  ring misses and 43 resets in the first 600 dispatches, and fell back to the latest camera almost every frame. Pairing
+  now uses `g_ld_frames`, which advances after every presentation. A frame's own camera is published before its draws,
+  so the smallest `latest - renderer frame` over a window is the measured offset. After the correction, the first 600
+  dispatches had 4 resets, 3 repeats, 2 jumps and 2 misses. `KZ3_XESS_CAMERA_LAG=-1` still restores the old behaviour.
 - **The `scene_lr` check accepts `bl` or `bctrl`.** `bctrl` alone might have rejected the correct 1.14 address, and that
   mistake could not be seen without a game run.
 - **The biased sampler is applied after the texture loop.** That leaves the patch 2136 memo holding the guest's sampler,
@@ -417,38 +420,44 @@ On Windows, RTX 5070, driver 617.42, g++ 16 from WinLibs.
 | All 292 patches from the pinned commit, with autocrlf off | Apply; the renderer is byte-identical to the edited tree |
 | `rsx_live_draw.c` on its own, with and without `KZ3_XESS` | Compiles; no XeSS symbols without it; every adapter function it calls is defined |
 | `xess.cpp` with `-Wall -Wextra -Werror` | Clean |
-| `main.cpp` with a stub for the generated `ppu_recomp.h` | Parses to the end; 7 errors, all missing lifted symbols, none on lines this branch touches. Not a real compile |
+| Complete native game target after regenerating the 292-patch toolkit | Builds with bundled Clang 23.1.3; this is the real `main.cpp`, adapter and renderer compile |
 | `test_xess_motion`, `test_xess_inputs`, `test_xess_camera`, `test_xess_compile`, `test_display_mode` | Pass |
 | Each fix's bug put back in a scratch copy (7 mutations) | All 7 caught by the intended check |
 | `test_xess.ps1`, the whole script | Pass: mask reads 204/0/255, motion is zero under the HUD box and non-zero elsewhere, near-16:9 re-init works, missing and wrong DLL fall back |
 | `test_xess_temporal` | Pass, same numbers as the review's probe |
 | `test_stage_xess`, `test_assemble_payload`, `test_pack_zip`, `test_launch`, `test_licenses_match`, `tools/port_ui_table.py`, `tools/features.py --check` | Pass |
 | The CMake `configure_file` loop in a small test project | Works |
+| Native gameplay, normal jitter and HUD mask on | XeSS dispatches 1280x720 to 1920x1080 with generated responsive/HUD masks and mip bias -0.586; camera basis +1.000; 600 dispatches / 4 resets after the pairing correction; constant small whole-scene jitter remains |
+| Native gameplay, `KZ3_XESS_HUD_MASK=0` | Whole-scene jitter is unchanged. The HUD remains visible, as expected: this switch disables its mask, not HUD drawing |
+| Temporary diagnostic build with projection and execute jitter forced to zero | XeSS remains active with depth, motion and the scene responsive mask; the whole-scene jitter disappears |
 
 Not run:
 
-- the game
 - the D3D12 debug layer (the optional Windows Graphics Tools feature is not installed here, so the new barriers are
   checked by reading and clean GPU runs only)
-- the bundled clang
 - Proton
 - Intel and AMD GPUs
 - shellcheck
 - `tools/run-host-tests.sh` and the Nix shells
 - `flake.nix`
 
-### Test plan
+### Gameplay result and remaining test plan
 
-The build needs the full patch set: `work/ps3recomp-patched` currently holds the FSR patches, so it must be regenerated
-before building.
+The full 292-patch toolkit was regenerated before the native build. The normal temporal path now reaches gameplay, but
+it is not visually stable: a small constant whole-scene jitter remains. Turning the HUD mask off did not change it.
+Forcing both the game projection jitter and the jitter supplied to XeSS to zero removed it, while XeSS continued to
+dispatch. That diagnostic was temporary and is not a proposed final mode; it isolates the next investigation to the
+actual game projection displacement, the value/sign/scale supplied to XeSS, or inconsistent jitter coverage across
+scene draws.
 
-Run gameplay at 1920x1080 with `KZ3_DISPLAY_FILTER=xess`, then read the log. In order:
+After correcting that path, rerun gameplay at 1920x1080 with `KZ3_DISPLAY_FILTER=xess`, then read the log. In order:
 
 1. `[xess] camera basis: cross(right, forward).up = +1.000`. **If this says -1, stop:** the pose axes are not what the
    reprojection assumes and motion will be wrong everywhere.
 2. `[xess] frame N: XeSS-SR 2.0.2 ...` should say `responsive=generated, hud=masked, mip bias -0.585`.
-3. `[xess] camera pairing: ...` lines. While playing, `used` should rise by one a frame, usually one behind `latest` if
-   the PPU runs ahead. `misses`, `repeats` and `jumps` should stay near zero. `repeats` rising during pause is expected.
+3. `[xess] camera pairing: renderer frame ...` lines. While playing, `used` should rise by one a frame, usually one
+   behind `latest` if the PPU runs ahead. `misses`, `repeats` and `jumps` should stay near zero. `repeats` rising during
+   pause is expected.
 
 Then look at the picture:
 

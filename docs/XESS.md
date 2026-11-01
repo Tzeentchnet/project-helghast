@@ -113,11 +113,13 @@ published states stay available by guest flip.
 
 The renderer picks a camera when it reaches the primary deferred draw. The PPU may already have moved on by then, so
 the latest published state can belong to the next frame. A frame's own camera is published before its draws are built,
-which means `latest flip - flips consumed` is never below the true offset, and its smallest value over the last 120 to
+which means `latest flip - renderer frame` is never below the true offset, and its smallest value over the last 120 to
 240 frames is that offset. The renderer uses the flip that offset gives. This assumes no fixed relationship between the
-two counters. If the PPU is ahead on every frame of the window the answer is the latest flip, the same as taking the
-latest state, and if the flip is no longer in the ring the latest state is used. `[xess] camera pairing` log lines show
-the numbers, including `misses`, the frames that fell back this way. If they show a constant extra lag,
+two counters. The renderer frame counter advances after every presentation; the older FIFO-only flip counter does not
+advance on every KZ3 presentation path and is not used here. If the PPU is ahead on every frame of the window the answer
+is the latest flip, the same as taking the latest state, and if the flip is no longer in the ring the latest state is
+used. `[xess] camera pairing` log lines show the numbers, including `misses`, the frames that fell back this way. If they
+show a constant extra lag,
 `KZ3_XESS_CAMERA_LAG` steps back by that many flips.
 
 Each dispatch then checks that the camera moved on by exactly one flip since the last dispatch. The same flip again
@@ -318,26 +320,42 @@ Validation that needs no game data:
   reconstruct, that the NDC path matches pixel-unit motion, and that flipped axes do not.
 
 Native Windows gameplay validation on 2026-10-31 used the hardware D3D12 path on an NVIDIA RTX 5070, a 1280x720
-game image, a 1920x1080 Fit output, and `KZ3_DISPLAY_FILTER=xess`. The log showed:
+game image, a 1920x1080 Fit output, and `KZ3_DISPLAY_FILTER=xess`. Before patch 2140, the log showed:
 
 - XeSS-SR API 2.0.2 dispatching 1280x720 to 1920x1080;
 - matched opaque and opaque-plus-translucent captures with the generated responsive mask;
 - 600 dispatches with 11 history resets during startup and camera transitions; and
 - no XeSS fallback after the pre-scene frame, dispatch failure, or device removal.
 
-The captured gameplay window was inspected and contained the expected scene and HUD rather than a black or corrupt
-output. Broader image-quality, performance, hardware, level, and Proton validation remains. That run predates patch
-2140, which has passed the host and GPU tests above but has not yet run in the game; see the test plan in
-[the review](../XESSReview.md).
+Patch 2140 was then built with the complete 292-patch toolkit and run in the same native configuration. Its first game
+run exposed a camera-pairing call-site error: the FIFO-only flip counter used for calibration stayed zero. The requested
+flip consequently froze, the 16-state ring missed 600 times, and the first 600 dispatches had 43 resets. Pairing now
+uses the renderer frame counter, which advances on every KZ3 presentation. After that correction:
+
+- the camera basis reported the required handedness, `+1.000`;
+- normal dispatch reported `responsive=generated`, `hud=masked`, and mip bias `-0.586`;
+- the first 600 dispatches had 4 resets, 3 repeats, 2 jumps, and 2 ring misses; and
+- 1,200 dispatches had 7 resets, with no dispatch failure or device removal.
+
+The corrected path still has a constant small whole-scene visual jitter. Disabling only the HUD mask with
+`KZ3_XESS_HUD_MASK=0` did not change it. A temporary diagnostic build forced both the game projection jitter and the
+jitter supplied to XeSS to zero; XeSS continued dispatching with depth, motion, and the scene responsive mask, and the
+whole-scene jitter disappeared. Zero jitter is not the intended fix because it gives up temporal sample placement. The
+remaining blocker is therefore the real game projection displacement, the sign or scale supplied to XeSS, or draws
+that do not receive the same jitter. Broader image-quality, performance, hardware, level, and Proton validation waits
+on that correction. See the measured record in [the review](../XESSReview.md).
 
 ## Known issues
 
+- Normal XeSS jitter currently produces a constant small whole-scene visual jitter in native gameplay. A temporary
+  zero-jitter diagnostic removes it, but that is not a final temporal-upscaling mode. The game projection displacement,
+  execute jitter convention, and coverage of jittered scene draws need to be measured together.
 - Motion is camera-only. Moving characters, weapons, particles, vegetation, and shader animation can ghost or
   shimmer.
 - XeSS runs after tone-mapping, the SPU post chain (including motion blur) and the HUD, on display-referred color.
   Intel recommends the start of the post chain, before tone-mapping, and calls later placement experimental.
 - UI and scene color are combined before XeSS. HUD pixels are masked and get zero motion, but they still pass through
-  the upscaler.
+  the upscaler. `KZ3_XESS_HUD_MASK=0` disables only that classification; it does not hide the HUD.
 - The responsive mask is inferred from scene captures. It is not a semantic transparency or composition mask, and it
   carries the frame's jitter, which Intel's guide says it should not.
 - Exposure is fixed for the LDR input; the game's exposure buffer is not integrated.
@@ -349,14 +367,16 @@ output. Broader image-quality, performance, hardware, level, and Proton validati
 
 ## Future work
 
-1. Publish coherent per-object and skeletal transforms and generate object motion vectors.
-2. Separate scene and UI composition so the HUD can be drawn after temporal upscaling.
-3. Replace the difference mask with semantic transparency/reactive information where the renderer exposes it.
-4. Integrate stable scene exposure or pre-exposure if it improves image stability.
-5. Add a user-facing quality policy after visual and performance measurements.
-6. Validate more Intel, NVIDIA, and AMD GPUs and the supported Windows/Proton paths.
-7. Investigate an ultrawide render-resolution policy without stretching the 16:9 temporal input.
-8. Evaluate XeSS Frame Generation and Xe Low Latency only as separate opt-in experiments after XeSS-SR is stable.
+1. Measure the actual screen-space displacement of the game projection jitter, compare it with the execute jitter
+   value, and identify any scene draws that miss the same shift.
+2. Publish coherent per-object and skeletal transforms and generate object motion vectors.
+3. Separate scene and UI composition so the HUD can be drawn after temporal upscaling.
+4. Replace the difference mask with semantic transparency/reactive information where the renderer exposes it.
+5. Integrate stable scene exposure or pre-exposure if it improves image stability.
+6. Add a user-facing quality policy after visual and performance measurements.
+7. Validate more Intel, NVIDIA, and AMD GPUs and the supported Windows/Proton paths.
+8. Investigate an ultrawide render-resolution policy without stretching the 16:9 temporal input.
+9. Evaluate XeSS Frame Generation and Xe Low Latency only as separate opt-in experiments after XeSS-SR is stable.
 
 ## Intel references
 

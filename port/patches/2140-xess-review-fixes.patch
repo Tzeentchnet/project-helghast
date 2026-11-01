@@ -4,8 +4,8 @@ repository root has the findings (F and M numbers below), the reasoning and the 
 - F1: no FXAA on jittered frames. The pass sat between the jitter and the temporal solve.
 - F2: the texture mip bias Intel requires, log2(input / target), on the units of jittered scene draws that have a mip
   chain. The jitter decision moves ahead of the sampler table for this. KZ3_XESS_MIP_BIAS overrides it for one run.
-- F3: the camera is paired with the flip being replayed instead of the latest one published, and a dispatch checks that
-  it moved on by exactly one flip: the same flip means no camera motion, a skipped flip resets history.
+- F3: the camera is paired with the renderer frame being built instead of the latest one published, and a dispatch
+  checks that it moved on by exactly one flip: the same flip means no camera motion, a skipped flip resets history.
   KZ3_XESS_CAMERA_LAG steps the pairing back; negative restores the old behaviour. "[xess] camera pairing" lines report it.
 - F4: a failed draw-time init reports kz3_xess_status() instead of blaming the camera.
 - F6: the display surface is captured right after the 3D compose. Pixels the HUD then changed get zero motion and full
@@ -204,7 +204,7 @@ index b9ac997..c197b2f 100644
 @@ -15992,12 +16054,29 @@ static void ld_xess_output_size(u32 requested_w, u32 requested_h, u32* w, u32* h
      *h = requested_h < max_h ? requested_h : max_h;
  }
- 
+
 -static int ld_xess_ensure_context(u32 output_w, u32 output_h)
 +/* KZ3_XESS_MIP_BIAS: the scene's extra LOD bias in mip levels, one run. Unset = Intel's log2(input / target); 0 = none. */
 +static int ld_xess_mip_bias_now(u32 output_w)
@@ -262,7 +262,7 @@ index b9ac997..c197b2f 100644
 +    const int lag = ld_xess_camera_lag();
 +    if (lag >= 0) {
 +        const u64 want = kz3_xess_pair_flip(
-+            &g_xess_pairing, latest.guest_flip, g_ld_flip_consumed, (u32)lag);
++            &g_xess_pairing, latest.guest_flip, g_ld_frames, (u32)lag);
 +        if (!kz3_xess_get_camera_for_flip(want, camera)) {
 +            *camera = latest;
 +            g_xess_camera_misses++;
@@ -271,9 +271,9 @@ index b9ac997..c197b2f 100644
 +    if (logs < 8 || !(g_ld_frames % 600u)) {
 +        logs++;
 +        fprintf(stderr,
-+                "[xess] camera pairing: frame %u, flips consumed %llu, latest %llu, used %llu "
++                "[xess] camera pairing: renderer frame %u, latest %llu, used %llu "
 +                "(repeats %u, jumps %u, misses %u)\n",
-+                g_ld_frames, (unsigned long long)g_ld_flip_consumed,
++                g_ld_frames,
 +                (unsigned long long)latest.guest_flip,
 +                (unsigned long long)camera->guest_flip,
 +                g_xess_camera_repeats, g_xess_camera_jumps, g_xess_camera_misses);
@@ -379,7 +379,7 @@ index b9ac997..c197b2f 100644
 +        }
          return NULL;
      }
- 
+
 @@ -18259,6 +18440,11 @@ static ID3D12Resource* ld_xess_present(
          detail = "the scanout color is not the primary RGBA8 render image";
          goto bypass;
@@ -394,7 +394,7 @@ index b9ac997..c197b2f 100644
          g_xess_zslot > g.n_zdepths) {
 @@ -18268,16 +18454,7 @@ static ID3D12Resource* ld_xess_present(
      }
- 
+
      {
 -        zdepth_t* depth = &g.zdepths[g_xess_zslot - 1u];
          kz3_xess_camera_state camera = g_xess_camera;
@@ -424,7 +424,7 @@ index b9ac997..c197b2f 100644
 +            detail = "the primary depth snapshot is unavailable or mismatched";
 +            goto bypass;
 +        }
- 
+
 -        D3D12_RESOURCE_BARRIER inputs[2] = {0};
 -        inputs[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
 -        inputs[0].Transition.pResource = surface->tex;
@@ -477,7 +477,7 @@ index b9ac997..c197b2f 100644
 -        }
 -        previous_time = now;
 +        g.list->lpVtbl->ResourceBarrier(g.list, 1, &input);
- 
+
          kz3_xess_camera_dispatch_desc dispatch = {0};
          dispatch.command_list = g.list;
          dispatch.color = surface->tex;
@@ -503,7 +503,7 @@ index b9ac997..c197b2f 100644
 @@ -18352,16 +18525,11 @@ static ID3D12Resource* ld_xess_present(
          ID3D12Resource* result = kz3_xess_dispatch_camera(&dispatch);
          LD_SM_INVALIDATE();
- 
+
 -        inputs[0].Transition.StateBefore =
 +        input.Transition.StateBefore =
              D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
@@ -544,7 +544,7 @@ index b9ac997..c197b2f 100644
                      dispatch.reset ||
                          (camera.flags & KZ3_XESS_CAMERA_RESET));
 @@ -18390,6 +18563,8 @@ static ID3D12Resource* ld_xess_present(
- 
+
  bypass:
      g_xess_last_dispatch_frame = UINT32_MAX;
 +    g_xess_have_last_camera = 0;

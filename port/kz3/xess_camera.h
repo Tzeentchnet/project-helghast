@@ -238,12 +238,12 @@ static inline int kz3_xess_bridge_find(
 }
 
 /*
- * Which published flip belongs to the frame the FIFO is replaying. The PPU counts flip requests and the renderer counts
- * flips consumed. Their difference is constant for a given frame relationship, and is not assumed to be zero. A frame's
- * own camera is published before its draws are built, and the PPU may have moved on by the time the primary draw is
- * reached, so (latest - consumed) is never below the true offset: its smallest recent value is that offset. If the PPU
- * is ahead on every frame of the window this returns the latest flip, which is no worse than taking the latest state.
- * lag moves the answer further back by whole flips (KZ3_XESS_CAMERA_LAG).
+ * Which published flip belongs to the renderer frame being built. The PPU counts flip requests and the renderer counts
+ * completed presentations. Their difference is constant for a given frame relationship, and is not assumed to be zero.
+ * A frame's own camera is published before its draws are built, and the PPU may have moved on by the time the primary
+ * draw is reached, so (latest - renderer frame) is never below the true offset: its smallest recent value is that
+ * offset. If the PPU is ahead on every frame of the window this returns the latest flip, which is no worse than taking
+ * the latest state. lag moves the answer further back by whole flips (KZ3_XESS_CAMERA_LAG).
  */
 typedef struct kz3_xess_pairing {
     int valid;
@@ -255,10 +255,10 @@ typedef struct kz3_xess_pairing {
 static inline uint64_t kz3_xess_pair_flip(
     kz3_xess_pairing* pairing,
     uint64_t latest_flip,
-    uint64_t consumed_flips,
+    uint64_t renderer_frame,
     uint32_t lag)
 {
-    const int64_t offset = (int64_t)latest_flip - (int64_t)consumed_flips;
+    const int64_t offset = (int64_t)latest_flip - (int64_t)renderer_frame;
     if (!pairing->valid) {
         pairing->valid = 1;
         pairing->age = 0;
@@ -275,7 +275,7 @@ static inline uint64_t kz3_xess_pair_flip(
         pairing->previous_min = pairing->window_min;
         pairing->window_min = offset;
     }
-    const int64_t want = (int64_t)consumed_flips + best - (int64_t)lag;
+    const int64_t want = (int64_t)renderer_frame + best - (int64_t)lag;
     return want > 0 ? (uint64_t)want : 0u;
 }
 

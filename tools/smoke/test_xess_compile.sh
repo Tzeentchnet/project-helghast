@@ -4,6 +4,15 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 O="$ROOT/build/smoke-host/xess-compile"
+PT="${KZ3_PATCHED_DIR:-$ROOT/work/ps3recomp-patched}"
+R="$PT/libs/video/rsx_live_draw.c"
+if [[ -f "$R" ]]; then
+  grep -Fq "latest.guest_flip, g_ld_frames" "$R" ||
+    { echo "[test_xess_compile] FAIL: camera pairing does not use the renderer frame counter"; exit 1; }
+  if grep -Fq "latest.guest_flip, g_ld_flip_consumed" "$R"; then
+    echo "[test_xess_compile] FAIL: camera pairing uses the FIFO-only flip counter"; exit 1
+  fi
+fi
 CXX=""
 if command -v x86_64-w64-mingw32-g++ >/dev/null 2>&1; then
   CXX=x86_64-w64-mingw32-g++
