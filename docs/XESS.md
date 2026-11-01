@@ -8,15 +8,16 @@ In brief, the implementation:
 
 - keeps the game rendering its original 1280x720 scene;
 - identifies the game's primary deferred pass and full-resolution depth;
-- applies XeSS jitter to scene geometry;
-- reconstructs camera motion from the current and previous camera poses plus depth;
-- compares coherent opaque and final scene captures to generate XeSS's responsive-pixel mask;
+- applies XeSS jitter and the mip bias Intel requires to scene geometry, and skips FXAA on those frames;
+- reconstructs camera motion from the current and previous camera poses plus depth, using the camera paired with the
+  frame being replayed;
+- compares coherent opaque and final scene captures to generate XeSS's responsive-pixel mask, and masks the HUD;
 - dispatches XeSS-SR into the selected larger output resolution; and
 - falls back to the existing Bilinear presentation path if any prerequisite fails.
 
 The current implementation is Super Resolution only. It does not include XeSS Frame Generation or Xe Low Latency.
-Moving objects do not yet have their own motion vectors, and the final scene, post-processing, and UI still share
-one color input.
+Moving objects do not yet have their own motion vectors. XeSS runs on the finished display image, after tone-mapping,
+the SPU post chain and the HUD; Intel's guide calls that placement experimental, with no guarantee of good quality.
 
 ## Enabling it
 
@@ -34,9 +35,18 @@ For one run without changing the saved setting:
 $env:KZ3_DISPLAY_FILTER = "xess"
 ```
 
-XeSS-SR is attempted only when the output is larger than 1280x720 and has the same aspect ratio. A 1920x1080
-output is the primary test case. The runtime chooses a XeSS quality mode from the requested scale; there is no
-separate quality selector yet.
+XeSS-SR is attempted only when the output is larger than 1280x720 and has the same aspect ratio, allowing one output
+pixel of rounding (1366x768 and rounded Fit sizes pass; 1920x1200 does not). A 1920x1080 output is the primary test
+case. The runtime chooses a XeSS quality mode from the requested scale; there is no separate quality selector yet.
+
+Switches for one run, each read once at the point named:
+
+| Switch | Default | Effect |
+|---|---|---|
+| `KZ3_DISPLAY_FILTER` | `display.ini` | `xess` selects this path |
+| `KZ3_XESS_MIP_BIAS` | Intel's `log2(input / target)` | LOD bias of scene draws, in mip levels; `0` turns it off |
+| `KZ3_XESS_CAMERA_LAG` | `0` | Whole flips to step back from the paired camera; negative takes the latest published camera |
+| `KZ3_XESS_HUD_MASK` | on | `0` turns the HUD mask off |
 
 ## Architecture
 
@@ -47,27 +57,29 @@ The Intel ABI and Killzone 3 hooks are kept outside the general ps3recomp runtim
 Recompiled game camera hooks
   -> current pose, effective FOV, guest flip and view ID
   -> validated near/far planes from the primary scene projection
-  -> port-owned camera bridge
+  -> port-owned camera bridge, which keeps recent states by guest flip
 
 RSX draw replay
   -> identify the full-resolution four-target deferred pass
-  -> remember and jitter its depth-tested geometry
-  -> jitter later depth-tested draws into the scene target
+  -> take the camera paired with the frame being replayed
+  -> remember, jitter and mip-bias its depth-tested geometry
+  -> jitter and mip-bias later depth-tested draws into the scene target
   -> capture the opaque deferred resolve
-  -> capture the scene immediately before temporal presentation
+  -> capture the finished scene and its depth at the scene copy (the NV0039 write-back to the SPU post chain)
+  -> skip FXAA on that surface
+  -> capture the display surface right after the 3D compose, before the HUD
 
 Presentation
-  -> use the deferred R32_FLOAT depth surface
-  -> generate R16G16_FLOAT current-to-previous NDC motion
-  -> generate an R8_UNORM responsive-pixel mask
+  -> generate an R8_UNORM responsive-pixel mask, with the HUD marked
+  -> generate R16G16_FLOAT current-to-previous NDC motion, zero under the HUD
   -> dispatch XeSS-SR into an RGBA8 output
   -> apply scan-out gamma and the existing display blit
   -> present
 
-Any missing, stale, unsupported, or incoherent input
+Any missing, unsupported, or incoherent input
   -> log the reason
   -> restore the normal resource states
-  -> use Bilinear presentation
+  -> use Bilinear presentation, and hold jitter off until a dispatch works
 ```
 
 ### Components
@@ -78,11 +90,14 @@ Any missing, stale, unsupported, or incoherent input
 | [`port/kz3/xess_api.h`](../port/kz3/xess_api.h) | Minimal independently authored XeSS-SR 2.0 ABI declarations used for dynamic loading |
 | [`port/kz3/xess.h`](../port/kz3/xess.h) | C boundary between the KZ3 adapter and the patched C renderer |
 | [`port/kz3/xess_motion.h`](../port/kz3/xess_motion.h) | Platform-independent depth reconstruction and camera reprojection |
-| [`port/kz3/xess_inputs.h`](../port/kz3/xess_inputs.h) | Pure deferred-pass, scene-resolve, jitter, and capture-pair selection rules |
+| [`port/kz3/xess_camera.h`](../port/kz3/xess_camera.h) | Platform-independent camera bridge, flip pairing, and freshness rules |
+| [`port/kz3/xess_inputs.h`](../port/kz3/xess_inputs.h) | Pure deferred-pass, scene-resolve, jitter, capture-pair, aspect, and mip-bias rules |
 | [`port/kz3/main.cpp`](../port/kz3/main.cpp) | Camera, FOV, and projection-plane publication |
 | [`port/patches/2139-xess-super-resolution.patch`](../port/patches/2139-xess-super-resolution.patch) | Renderer integration, input selection, presentation ordering, UI, and fallback |
+| [`port/patches/2140-xess-review-fixes.patch`](../port/patches/2140-xess-review-fixes.patch) | Fixes from [the review](../XESSReview.md): FXAA, mip bias, camera pairing, failure reporting, HUD mask, re-init safety |
 | [`tools/release/stage_xess.py`](../tools/release/stage_xess.py) | Release-time validation and staging of Intel's unmodified runtime and required notices |
-| [`tools/smoke/test_xess.cpp`](../tools/smoke/test_xess.cpp) | Native D3D12 context, dispatch, responsive-mask, readback, and fallback smoke test |
+| [`tools/smoke/test_xess.cpp`](../tools/smoke/test_xess.cpp) | Native D3D12 context, dispatch, mask and motion contents, readback, and fallback smoke test |
+| [`tools/smoke/test_xess_temporal.cpp`](../tools/smoke/test_xess_temporal.cpp) | Native check that XeSS reconstructs with the port's jitter and motion conventions |
 
 ## Frame pipeline
 
@@ -93,9 +108,21 @@ right, forward, and up vectors followed by position. Horizontal and vertical FOV
 widescreen adjustment.
 
 Pose, FOV, projection planes, guest flip, and view ID are published atomically only after both camera and projection
-data for that guest flip are available. Until then, the last coherent snapshot remains visible. The renderer
-snapshots that state when it reaches the primary deferred draw. This avoids both a camera/projection publication
-race and any assumption that the PPU flip counter and the renderer's FIFO frame counter have a fixed offset.
+data for that guest flip are available. Until then, the last coherent snapshot remains visible, and the last 16
+published states stay available by guest flip.
+
+The renderer picks a camera when it reaches the primary deferred draw. The PPU may already have moved on by then, so
+the latest published state can belong to the next frame. A frame's own camera is published before its draws are built,
+which means `latest flip - flips consumed` is never below the true offset, and its smallest value over the last 120 to
+240 frames is that offset. The renderer uses the flip that offset gives. This assumes no fixed relationship between the
+two counters. If the PPU is ahead on every frame of the window the answer is the latest flip, the same as taking the
+latest state, and if the flip is no longer in the ring the latest state is used. `[xess] camera pairing` log lines show
+the numbers, including `misses`, the frames that fell back this way. If they show a constant extra lag,
+`KZ3_XESS_CAMERA_LAG` steps back by that many flips.
+
+Each dispatch then checks that the camera moved on by exactly one flip since the last dispatch. The same flip again
+means nothing moved, so the frame gets zero camera motion instead of repeating the old delta (`repeats` in the log). A
+skipped flip resets history (`jumps`).
 
 The primary 1.14 scene caller of `Camera::vf17` supplies the near and far values used for depth reconstruction. An
 observed campaign frame used near `0.2` and far `2048`. A different projection path using `0.1` and `512` is ignored.
@@ -132,7 +159,16 @@ frame. The same XeSS jitter is applied to the primary pass and to later depth-te
 target that reuse that depth.
 
 Jitter starts only after the runtime, context, camera, projection, and output size are ready. A missing or rejected
-XeSS runtime therefore cannot leave a visibly jittered frame before Bilinear fallback.
+XeSS runtime therefore cannot leave a visibly jittered frame before Bilinear fallback. If a jittered frame falls back
+later in the frame, jitter is held off and the following frames go through XeSS unjittered. The first dispatch that
+works clears the hold, so at most one jittered frame reaches Bilinear.
+
+Jittered draws also get the mip bias Intel's guide requires, `log2(input / target)`: about -0.585 at 1080p, -1 at 1440p
+and -1.585 at 4K. It adds to the guest's own bias on texture units that have a mip chain, in a separate sampler. If the
+128-entry sampler cache is full the draw keeps the guest's sampler.
+
+FXAA, which runs in place of SPU MLAA, is skipped on jittered frames: a spatial filter would work against the temporal
+solve. Frames that do not go through XeSS keep it.
 
 ### 3. Motion vectors
 
@@ -151,24 +187,35 @@ Depth makes camera translation spatially correct: nearby geometry moves farther 
 rotation and translation are represented. Object, skeletal, vegetation, particle, and shader-driven motion are
 not. Those pixels currently receive camera motion only.
 
+Depth comes from an adapter-owned copy taken at the scene copy, so a later write to the same zeta in the frame cannot
+reach XeSS. Pixels the HUD changed get zero motion, because static text must not be reprojected with the world behind
+it. The conventions are checked against the runtime by `tools/smoke/test_xess_temporal.cpp`.
+
 ### 4. Responsive-pixel mask
 
 The game resolves deferred lighting into the local scene target at `0x01300000`, then adds translucent effects and
-other forward composition before presentation. The adapter captures:
+other forward composition. At the NV0039 copy the scene leaves for the SPU post chain, and it comes back through the
+3D compose into the display surface, where the HUD is drawn. The adapter captures:
 
-- the first validated opaque lighting resolve; and
-- the final same-resource scene color immediately before temporal presentation.
+- the first validated opaque lighting resolve;
+- the final same-resource scene color at the scene copy;
+- the display surface right after the 3D compose, which is the frame without its HUD; and
+- the presented surface at dispatch.
 
-The pair is accepted only when frame number, resource identity, dimensions, and XeSS context generation match.
+A pair is accepted only when frame number, resource identity, dimensions, and XeSS context generation match.
 A compute pass writes an input-resolution `R8_UNORM` responsive-pixel mask:
 
 ```text
-max(abs(final.rgb - opaque.rgb)) >= 0.2 ? 0.8 : 0.0
+translucent: max(abs(scene.rgb - opaque.rgb)) >= 0.2 gives 0.8
+HUD:         max(abs(presented.rgb - composed.rgb)) >= 0.006 gives 1.0
 ```
 
-The threshold and mask value are an experimental heuristic, not game-derived transparency semantics.
-This marks composition that changed after the opaque resolve so XeSS favors the current frame there. If the pair is
-missing or stale, the mask is cleared instead of reusing old data.
+The thresholds and mask values are experimental heuristics, not game-derived transparency semantics.
+The first marks composition that changed after the opaque resolve so XeSS favors the current frame there. The second
+marks pixels the HUD touched: outside the HUD the two images are identical, so the threshold only has to clear
+rounding. The motion pass reads the 1.0 value, and XeSS clamps the mask to its default 0.8. If a pair is missing or
+stale, that part of the mask is left out instead of reusing old data. Anything else drawn over the display surface
+after the compose, such as a full-screen fade, also counts as HUD; `KZ3_XESS_HUD_MASK=0` removes this part for one run.
 
 ### 5. XeSS dispatch and presentation
 
@@ -206,7 +253,9 @@ output and quality. It rejects the context if the game's actual input is outside
 ## Runtime loading and redistribution
 
 The adapter does not use Intel's import library. It dynamically resolves only the XeSS-SR exports it needs and
-loads `libxess.dll` only from beside `kz3.exe`, with Windows system dependencies restricted to System32.
+loads `libxess.dll` only from beside `kz3.exe`, with Windows system dependencies restricted to System32. Intel lists
+the Visual C++ Redistributable 14.40.33810 or later as a requirement; without it the DLL cannot load and the log names
+it. On Intel GPUs Intel's dispatcher may use the implementation bundled with the driver.
 
 The SDK package version is 3.0.2, while the runtime's exported XeSS-SR API and Windows file version are 2.0.2. The
 adapter requires exactly API 2.0.2 and fails closed on a different ABI.
@@ -228,19 +277,25 @@ XeSS-SR does not contact the network.
 
 ## Fallback behavior
 
-Selecting XeSS never makes it a startup requirement. The renderer uses Bilinear for the frame and logs the reason
-when any of these conditions applies:
+Selecting XeSS never makes it a startup requirement. The renderer uses Bilinear for the frame and logs the reason,
+once per change of reason, when any of these conditions applies:
 
 - `libxess.dll` is missing, invalid, or exposes a different API;
 - D3D12 or the current driver cannot create an XeSS context;
 - input and output do not share an aspect ratio;
 - output is not larger, or exceeds the supported 3x scale;
 - XeSS rejects the actual input resolution for the selected quality;
-- the deferred depth, camera snapshot, projection, or target is stale;
+- the deferred depth, camera, projection, or target is missing for this frame;
 - resources have incompatible dimensions or formats; or
 - motion generation, responsive-mask generation, or XeSS dispatch fails.
 
-The Options page warns before enabling the experimental path. Cancel restores the currently active filter.
+A context that cannot be built for one device and size is not retried every frame; a size change tries again. A stale
+camera does not fall back: it keeps the frame in XeSS with zero camera motion (see Camera and projection publication).
+Switching the filter away from XeSS releases the context and its textures at the next present. Resizing rebuilds them,
+after flushing any open work that still uses them.
+
+The Options page warns before enabling the experimental path. Cancel restores the currently active filter. The row
+keeps showing XeSS-SR during a fallback; the reason is only in the log.
 
 ## Validation
 
@@ -250,13 +305,17 @@ Validation that needs no game data:
 - local XeSS ABI sizes and offsets match Intel's official 2.0 headers;
 - the official runtime reports XeSS-SR API 2.0.2;
 - motion tests cover identity, rotation, depth-aware translation, FOV changes, and invalid projection data;
-- input tests cover deferred-pass selection, jitter eligibility, opaque resolve selection, and capture coherence;
+- input tests cover deferred-pass selection, jitter eligibility, opaque resolve selection, capture coherence, aspect
+  rounding, and the mip bias field;
+- camera tests cover publication, resets, the flip ring, pairing, freshness, and pose handedness;
 - display tests cover parsing, `display.ini`, the options row, warning/cancel behavior, reset, and no unsupported
   sharpness control;
 - release tests cover exact hashes, AMD64 PE validation, required notices, payload assembly, portable ZIP inclusion,
-  and launcher placement; and
-- the native D3D12 smoke test dispatches 1280x720 to 1920x1080, uses the responsive-mask path, reads back a non-empty
-  output, and verifies missing, wrong, and unsupported-aspect fallback.
+  and launcher placement;
+- the native D3D12 smoke test dispatches 1280x720 to 1920x1080, reads back the mask and motion contents and a non-empty
+  output, and verifies near-16:9 re-init and missing, wrong, and unsupported-aspect fallback; and
+- the native temporal test feeds a moving scene for 64 frames and checks that the port's jitter and motion conventions
+  reconstruct, that the NDC path matches pixel-unit motion, and that flipped axes do not.
 
 Native Windows gameplay validation on 2026-10-31 used the hardware D3D12 path on an NVIDIA RTX 5070, a 1280x720
 game image, a 1920x1080 Fit output, and `KZ3_DISPLAY_FILTER=xess`. The log showed:
@@ -267,14 +326,20 @@ game image, a 1920x1080 Fit output, and `KZ3_DISPLAY_FILTER=xess`. The log showe
 - no XeSS fallback after the pre-scene frame, dispatch failure, or device removal.
 
 The captured gameplay window was inspected and contained the expected scene and HUD rather than a black or corrupt
-output. Broader image-quality, performance, hardware, level, and Proton validation remains.
+output. Broader image-quality, performance, hardware, level, and Proton validation remains. That run predates patch
+2140, which has passed the host and GPU tests above but has not yet run in the game; see the test plan in
+[the review](../XESSReview.md).
 
 ## Known issues
 
 - Motion is camera-only. Moving characters, weapons, particles, vegetation, and shader animation can ghost or
   shimmer.
-- UI and scene color are combined before XeSS, so HUD text and icons receive temporal treatment.
-- The responsive mask is inferred from two scene captures. It is not a semantic transparency or composition mask.
+- XeSS runs after tone-mapping, the SPU post chain (including motion blur) and the HUD, on display-referred color.
+  Intel recommends the start of the post chain, before tone-mapping, and calls later placement experimental.
+- UI and scene color are combined before XeSS. HUD pixels are masked and get zero motion, but they still pass through
+  the upscaler.
+- The responsive mask is inferred from scene captures. It is not a semantic transparency or composition mask, and it
+  carries the frame's jitter, which Intel's guide says it should not.
 - Exposure is fixed for the LDR input; the game's exposure buffer is not integrated.
 - The game still renders at 1280x720. XeSS does not increase geometry, shadow, or material resolution.
 - Output must keep the 16:9 input aspect ratio. Ultrawide temporal output needs a separate policy.

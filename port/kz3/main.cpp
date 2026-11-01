@@ -2792,6 +2792,8 @@ static void kz3_fov_view_note(uint32_t view, double A0, double A1)   /* at the w
     v.applied = s_fov_applied;
 }
 #if defined(KZ3_XESS)
+/* ENHANCEMENT: the camera for XeSS-SR, held from the writer until vf22 has the vertical field of view (docs/XESS.md).
+ * ASSUMPTION: the pose at src is 4 rows of right, forward, up and position (see xess_motion.h). */
 static uint32_t s_xess_camera_view, s_xess_camera_flip;
 static float s_xess_camera_pose[16], s_xess_camera_hfov;
 static int s_xess_camera_pending;
@@ -2948,13 +2950,15 @@ static void kz3_vf22_aspect(ppu_context* ctx)   /* GameViewGame::vf22 @0x007E590
  * KZ3_HUD_PROJ=0 turns it off for one run (A/B); KZ3_HUD_PROJ_LOG=1 prints the frustum once a second. */
 #include "rsx_hud169.h"
 extern "C" int rsx_live_draw_hud169_factors(float* kx, float* ky);   /* rsx_live_draw.c (patch 2113) */
+/* scene_lr (ENHANCEMENT, XeSS-SR): the caller of Camera::vf17 that builds the primary scene projection. 1.14 was seen at
+ * run time with near 0.2 and far 2048. ASSUMPTION: the 1.00 value is mapped from 1.14 and has never run. */
 struct Kz3HudProjVer { uint32_t vf17, lr, scene_lr; };
 static constexpr Kz3HudProjVer kHudProj100 = {
-                                    0x0031E120u,
+                                    0x0031E120u,   /* @0x0031E120 Camera::vf17 */
                                     0x007EA52Cu,
                                     0x007F0A98u},
                                 kHudProj114 = {
-                                    0x00329D80u,
+                                    0x00329D80u,   /* @0x00329D80 Camera::vf17 */
                                     0x0080BDECu,
                                     0x008123B8u};
 static void (*s_cvf17_orig)(ppu_context*);
@@ -3007,6 +3011,7 @@ static void kz3_cam_vf17_hud(ppu_context* ctx)   /* Camera::vf17 0x00329D80 (1.0
         }
     }
 #if defined(KZ3_XESS)
+    /* ASSUMPTION: words 1 and 2 of the vf17 result are near and far, read from the observed values, not the code. */
     if (lr == s_xess_projection_lr &&
         out >= 0x10000u && out < 0xF0000000u) {
         kz3_xess_note_camera_planes(
@@ -3048,7 +3053,13 @@ static void kz3_hud_proj_init(void)
     }
     s_hudp_lr = v->lr;
 #if defined(KZ3_XESS)
-    s_xess_projection_lr = v->scene_lr;
+    /* A return address follows a call, direct (bl) or through the vtable (bctrl). A wrong scene_lr only means no planes
+     * and the Bilinear fallback, but it should say so. */
+    const uint32_t scene_call = kz3_be32(v->scene_lr - 4);
+    if ((scene_call & 0xFFE0FFFFu) == 0x4E800421u || (scene_call & 0xFC000003u) == 0x48000001u)
+        s_xess_projection_lr = v->scene_lr;
+    else
+        printf("[xess] scene projection hook NOT set: no call before lr 0x%08X; XeSS-SR will fall back\n", v->scene_lr);
 #endif
     ppu_register_function(v->vf17, kz3_cam_vf17_hud);
     printf("[hudproj] HUD world projection hook on Camera::vf17 0x%08X at lr 0x%08X (%s): %s\n", v->vf17, v->lr,

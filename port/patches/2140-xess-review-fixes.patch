@@ -1,0 +1,588 @@
+KZ3 patch 2140 (ENHANCEMENT, experimental): fixes from the XeSS-SR review, on top of patch 2139. XESSReview.md at the
+repository root has the findings (F and M numbers below), the reasoning and the test plan.
+
+- F1: no FXAA on jittered frames. The pass sat between the jitter and the temporal solve.
+- F2: the texture mip bias Intel requires, log2(input / target), on the units of jittered scene draws that have a mip
+  chain. The jitter decision moves ahead of the sampler table for this. KZ3_XESS_MIP_BIAS overrides it for one run.
+- F3: the camera is paired with the flip being replayed instead of the latest one published, and a dispatch checks that
+  it moved on by exactly one flip: the same flip means no camera motion, a skipped flip resets history.
+  KZ3_XESS_CAMERA_LAG steps the pairing back; negative restores the old behaviour. "[xess] camera pairing" lines report it.
+- F4: a failed draw-time init reports kz3_xess_status() instead of blaming the camera.
+- F6: the display surface is captured right after the 3D compose. Pixels the HUD then changed get zero motion and full
+  responsiveness, so static text is no longer reprojected with the world. KZ3_XESS_HUD_MASK=0 turns it off for one run.
+- F7: a jittered frame that falls back holds jitter off. The next frames still go through XeSS unjittered, and the first
+  dispatch that works clears the hold, so Bilinear cannot show a jittering picture for long.
+- F10: re-initialising from the present path flushes the open list first. Intel requires pending XeSS work to finish, and
+  the waits here only covered submitted lists, so a capture still in the open list could have outlived its texture.
+- M2, M3: depth moves into an adapter-owned texture at the scene copy, so no descriptor is rewritten with a frame in
+  flight and a later write to the zeta cannot reach XeSS.
+- M4: the 250 ms hitch no longer resets history; game time is frame-locked, so a hitch does not invalidate it.
+- M8: switching the filter away from XeSS releases the context at the next present.
+
+The rules live in port/kz3/xess_camera.h and xess_inputs.h, with host tests in tools/smoke/test_xess_camera.c and
+test_xess_inputs.c. tools/smoke/test_xess.cpp checks the mask and motion contents on a real GPU. Non-KZ3 builds compile
+none of this. Written from Intel's public XeSS SDK 3.0.2 developer guide; no game code or Intel source.
+diff --git a/libs/video/rsx_live_draw.c b/libs/video/rsx_live_draw.c
+index b9ac997..c197b2f 100644
+--- a/libs/video/rsx_live_draw.c
++++ b/libs/video/rsx_live_draw.c
+@@ -13810,6 +13810,43 @@ static kz3_xess_capture_key g_xess_opaque_capture;
+ static u32 g_xess_responsive_frame = UINT32_MAX;
+ static u32 g_xess_responsive_context_generation;
+ static int ld_xess_draw_jitter(u32 frame, float* x, float* y);
++/* KZ3 patch 2140: see the patch header. */
++static u32 g_xess_context_failed_frame = UINT32_MAX;   /* the draw-time init of that frame failed: kz3_xess_status() says why */
++static int g_xess_jitter_hold;                         /* a jittered frame fell back: no jitter until a dispatch works */
++static u32 g_xess_depth_frame = UINT32_MAX;
++static u32 g_xess_compose_frame = UINT32_MAX;
++static u32 g_xess_compose_context_generation;
++static uintptr_t g_xess_compose_resource;
++static int g_xess_mip_bias_fp;                         /* extra LOD bias of the scene draws, signed 4.8 */
++static kz3_xess_pairing g_xess_pairing;
++static int g_xess_have_last_camera;
++static u64 g_xess_last_camera_flip;
++static u32 g_xess_camera_repeats, g_xess_camera_jumps, g_xess_camera_misses;
++
++/* KZ3_XESS_HUD_MASK=0 turns the HUD mask off for one run (default on). */
++static int ld_xess_hud_mask_on(void)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("KZ3_XESS_HUD_MASK"); on = !(e && e[0] == '0'); }
++    return on;
++}
++
++/* Intel: XeSS-SR needs a mip bias of log2(input / target). The units of a scene draw that have a mip chain get it; the
++ * guest's own sampler stays if the cache is full (sampler_slot then answers the default sampler). */
++static void ld_xess_bias_samplers(u32 texture_mask, u32* smp_slots)
++{
++    if (!g_xess_mip_bias_fp) return;
++    for (u32 u = 0; u < SMP_TABLE_SIZE; u++) {
++        if (!((texture_mask >> u) & 1u)) continue;
++        rsx_dsp_texture t; rsx_dsp_get_texture(&g.rsx, u, &t);
++        const u32 minf = (t.filter >> 16) & 0x7u;
++        if (minf < 3u || minf > 6u) continue;   /* decode_sampler's mip_present */
++        t.filter = kz3_xess_filter_with_bias(t.filter, g_xess_mip_bias_fp);
++        u32 skey[4]; sampler_key(&t, skey);
++        const u32 slot = sampler_slot(&t, skey);
++        if (slot != SMP_DEFAULT) smp_slots[u] = slot;
++    }
++}
+ #endif
+ static u32 g_h169_frame = 0xFFFFFFFFu;
+ static int g_h169_depth_seen, g_h169_disp_seen, g_h169_rt_sampled;
+@@ -14762,6 +14799,41 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
+         else
+             g_ld_vtex_unsupported++;
+     }
++#if defined(KZ3_XESS)
++    /* Patch 2140: decided here, not at xf below. The sampler table of this draw is built next, and a first-frame init
++     * blocks, so it runs before any of this draw's state is recorded. */
++    int xess_jitter = 0, xess_capture_opaque = 0;
++    float xess_jx = 0.0f, xess_jy = 0.0f;
++    {
++        const float xvw = (sf.clip_w ? (float)sf.clip_w : (float)g.width) / (float)sf.aa_sx;
++        const float xvh = (sf.clip_h ? (float)sf.clip_h : (float)g.height) / (float)sf.aa_sy;
++        const kz3_xess_draw_info xess_draw = {
++            g_ld_frames,
++            g.surfaces[target].offset,
++            g.surfaces[target].w,
++            g.surfaces[target].h,
++            n_mrt,
++            current_zslot,
++            g_h169_rt_off,
++            g.surfaces[target].location == 0u,
++            vp.scale[0] == xvw * 0.5f && vp.translate[0] == xvw * 0.5f &&
++                fabsf(vp.scale[1]) == xvh * 0.5f && vp.translate[1] == xvh * 0.5f,
++            (rsx_dsp_reg(&g.rsx, M_DEPTH_TEST_ENABLE) & 1u) != 0,
++            (rsx_dsp_reg(&g.rsx, M_BLEND_ENABLE) & 1u) != 0,
++            g_h169_rt_sampled
++        };
++        if (kz3_xess_is_deferred_primary(&xess_draw, g.width, g.height)) {
++            g_xess_zslot = current_zslot;
++            g_xess_zframe = g_ld_frames;
++        }
++        if (kz3_xess_should_jitter(&xess_draw, g.width, g.height, g_xess_zframe, g_xess_zslot) &&
++            ld_xess_draw_jitter(g_ld_frames, &xess_jx, &xess_jy)) {
++            xess_jitter = 1;
++            ld_xess_bias_samplers(texture_mask, smp_slots);
++        }
++        xess_capture_opaque = kz3_xess_is_opaque_resolve(&xess_draw, g.width, g.height);
++    }
++#endif
+     LDW_ADD(RSX_PERF_W_D_TEXLOOP_T, texloop_t0);
+     LDW_T0(desc_t0);   /* patch 2045 */
+     const u32 required_srv_tables = 1u + (vtex_mask != 0);
+@@ -14900,7 +14972,7 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
+     float h_kx = 1.0f, h_ky = 1.0f;
+     int h169 = 0;
+ #if defined(KZ3_XESS)
+-    int xess_capture_opaque = 0;
++    int xess_compose = 0;
+ #endif
+     {
+         const int full = vp.scale[0] == Wv * 0.5f && vp.translate[0] == Wv * 0.5f &&
+@@ -14911,6 +14983,9 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
+         if (display) {
+             const int first = !g_h169_disp_seen;
+             g_h169_disp_seen = 1;
++#if defined(KZ3_XESS)
++            xess_compose = first && g_h169_depth_seen && full;   /* patch 2140: the frame before its HUD */
++#endif
+             if (ld_h169_factors(&h_kx, &h_ky)) {
+                 const int compose = first && g_h169_depth_seen;
+                 h169 = full && is169 && !compose && !g_h169_rt_sampled;
+@@ -14926,41 +15001,10 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
+             }
+         }
+ #if defined(KZ3_XESS)
+-        const int depth_test =
+-            (rsx_dsp_reg(&g.rsx, M_DEPTH_TEST_ENABLE) & 1u) != 0;
+-        kz3_xess_draw_info xess_draw = {
+-            g_ld_frames,
+-            g.surfaces[target].offset,
+-            g.surfaces[target].w,
+-            g.surfaces[target].h,
+-            n_mrt,
+-            current_zslot,
+-            g_h169_rt_off,
+-            g.surfaces[target].location == 0u,
+-            full,
+-            depth_test,
+-            (rsx_dsp_reg(&g.rsx, M_BLEND_ENABLE) & 1u) != 0,
+-            g_h169_rt_sampled
+-        };
+-        if (kz3_xess_is_deferred_primary(
+-                &xess_draw, g.width, g.height)) {
+-            g_xess_zslot = current_zslot;
+-            g_xess_zframe = g_ld_frames;
+-        }
+-        if (kz3_xess_should_jitter(
+-                &xess_draw,
+-                g.width,
+-                g.height,
+-                g_xess_zframe,
+-                g_xess_zslot)) {
+-            float jx, jy;
+-            if (ld_xess_draw_jitter(g_ld_frames, &jx, &jy)) {
+-                xf[4] += 2.0f * jx / Wv;
+-                xf[5] -= 2.0f * jy / Hv;
+-            }
++        if (xess_jitter) {
++            xf[4] += 2.0f * xess_jx / Wv;
++            xf[5] -= 2.0f * xess_jy / Hv;
+         }
+-        xess_capture_opaque = kz3_xess_is_opaque_resolve(
+-            &xess_draw, g.width, g.height);
+ #endif
+         {   /* patch 2118 diagnostics: KZ3_HUD_169_LOG=2 KZ3_HUD_169_LOGF=<frame>: every draw of 3 frames, any target */
+             static int dl = -2; static u32 df = 0;
+@@ -15175,6 +15219,24 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
+                     "surface 0x%08X\n",
+                     g_ld_frames, g.surfaces[target].offset);
+     }
++    if (oq_pred >= 0 && xess_compose && ld_xess_hud_mask_on() &&
++        g_xess_camera_frame == g_ld_frames &&
++        g_xess_compose_frame != g_ld_frames &&
++        kz3_xess_capture_compose_color(
++            g.list,
++            g.surfaces[target].tex,
++            g.surfaces[target].w,
++            g.surfaces[target].h)) {
++        static u32 compose_logs;
++        g_xess_compose_frame = g_ld_frames;
++        g_xess_compose_context_generation = g_xess_context_generation;
++        g_xess_compose_resource = (uintptr_t)g.surfaces[target].tex;
++        if (compose_logs++ < 4)
++            fprintf(stderr,
++                    "[xess] frame %u: captured composed scene "
++                    "surface 0x%08X\n",
++                    g_ld_frames, g.surfaces[target].offset);
++    }
+ #endif
+     if (g_gt.on > 0) ld_gt_draw(target, n_mrt, mrt, current_zslot, n_tri, sf.clip_w * sf.clip_h, (u32)__builtin_popcount(texture_mask));   /* patch 2052 */
+     LDW_ADD(RSX_PERF_W_D_REC_T, rec_t0);
+@@ -15992,12 +16054,29 @@ static void ld_xess_output_size(u32 requested_w, u32 requested_h, u32* w, u32* h
+     *h = requested_h < max_h ? requested_h : max_h;
+ }
+ 
+-static int ld_xess_ensure_context(u32 output_w, u32 output_h)
++/* KZ3_XESS_MIP_BIAS: the scene's extra LOD bias in mip levels, one run. Unset = Intel's log2(input / target); 0 = none. */
++static int ld_xess_mip_bias_now(u32 output_w)
++{
++    const char* e = getenv("KZ3_XESS_MIP_BIAS");
++    if (e && *e) return (int)lroundf((float)atof(e) * 256.0f);
++    return kz3_xess_mip_bias_fp(g.width, output_w);
++}
++
++/* may_flush: 0 from a draw, where a flush would lose this draw's recorded state. Nothing of XeSS is in the open list at
++ * the first scene draw of a frame, so the fence is enough there. The present path may hold this frame's captures. */
++static int ld_xess_ensure_context(u32 output_w, u32 output_h, int may_flush)
+ {
+     const int changed =
+         g_xess_context_w != output_w || g_xess_context_h != output_h;
+-    if (changed && g_xess_context_w)
+-        ld_wait_fence(g.fence_value);
++    if (kz3_xess_would_recreate(
++            g.dev, g.width, g.height, output_w, output_h)) {
++        if (may_flush) {
++            ld_flush(LD_FLUSH_RETIRE_QUEUE);
++            if (!g.ready) return 0;
++        } else {
++            ld_wait_fence(g.fence_value);
++        }
++    }
+     if (!kz3_xess_initialize(
+             g.dev, g.width, g.height, output_w, output_h)) {
+         g_xess_context_w = g_xess_context_h = 0;
+@@ -16007,6 +16086,45 @@ static int ld_xess_ensure_context(u32 output_w, u32 output_h)
+         g_xess_context_w = output_w;
+         g_xess_context_h = output_h;
+         g_xess_context_generation++;
++        g_xess_depth_frame = UINT32_MAX;
++        g_xess_mip_bias_fp = ld_xess_mip_bias_now(output_w);
++    }
++    return 1;
++}
++
++/* KZ3_XESS_CAMERA_LAG: whole flips to step back from the paired camera, one run (default 0). Negative = take the latest
++ * published camera, the behaviour before patch 2140. */
++static int ld_xess_camera_lag(void)
++{
++    static int lag = 0, read = 0;
++    if (!read) { const char* e = getenv("KZ3_XESS_CAMERA_LAG"); lag = e && *e ? atoi(e) : 0; read = 1; }
++    return lag;
++}
++
++static int ld_xess_pick_camera(kz3_xess_camera_state* camera)
++{
++    static u32 logs;
++    kz3_xess_camera_state latest;
++    if (!kz3_xess_get_camera(&latest)) return 0;
++    *camera = latest;
++    const int lag = ld_xess_camera_lag();
++    if (lag >= 0) {
++        const u64 want = kz3_xess_pair_flip(
++            &g_xess_pairing, latest.guest_flip, g_ld_flip_consumed, (u32)lag);
++        if (!kz3_xess_get_camera_for_flip(want, camera)) {
++            *camera = latest;
++            g_xess_camera_misses++;
++        }
++    }
++    if (logs < 8 || !(g_ld_frames % 600u)) {
++        logs++;
++        fprintf(stderr,
++                "[xess] camera pairing: frame %u, flips consumed %llu, latest %llu, used %llu "
++                "(repeats %u, jumps %u, misses %u)\n",
++                g_ld_frames, (unsigned long long)g_ld_flip_consumed,
++                (unsigned long long)latest.guest_flip,
++                (unsigned long long)camera->guest_flip,
++                g_xess_camera_repeats, g_xess_camera_jumps, g_xess_camera_misses);
+     }
+     return 1;
+ }
+@@ -16025,12 +16143,19 @@ static int ld_xess_draw_jitter(u32 frame, float* x, float* y)
+             ld_dm_scaling_now(), RSX_DM_BILINEAR);
+         u32 output_w, output_h;
+         ld_xess_output_size((u32)output.w, (u32)output.h, &output_w, &output_h);
+-        if (!kz3_xess_get_camera(&camera) ||
++        if (!ld_xess_pick_camera(&camera) ||
+             !(camera.flags & KZ3_XESS_CAMERA_PLANES_VALID) ||
+             (camera.flags & KZ3_XESS_CAMERA_MULTIPLE_VIEWS) ||
+             output_w < g.width || output_h < g.height ||
+-            (output_w == g.width && output_h == g.height) ||
+-            !ld_xess_ensure_context(output_w, output_h) ||
++            (output_w == g.width && output_h == g.height)) {
++            return 0;
++        }
++        if (!ld_xess_ensure_context(output_w, output_h, 0)) {
++            g_xess_context_failed_frame = frame;
++            return 0;
++        }
++        /* While held the frame is not jittered, but still goes through XeSS: that dispatch is the test that clears it. */
++        if (!g_xess_jitter_hold &&
+             !kz3_xess_get_jitter(
+                 frame, g.width, output_w,
+                 &g_xess_jitter_x, &g_xess_jitter_y)) {
+@@ -16043,6 +16168,45 @@ static int ld_xess_draw_jitter(u32 frame, float* x, float* y)
+     *y = g_xess_jitter_y;
+     return g_xess_jitter_x != 0.0f || g_xess_jitter_y != 0.0f;
+ }
++
++static int ld_xess_frame_jittered(void)
++{
++    return g_dm_filter == RSX_DM_XESS && g_xess_jitter_frame == g_ld_frames &&
++           (g_xess_jitter_x != 0.0f || g_xess_jitter_y != 0.0f);
++}
++
++/* The depth of the scene pass, kept in the adapter's own texture: a later write to this zeta in the frame cannot reach
++ * XeSS. Taken at the scene copy, or at present when the frame had no scene copy. */
++static int ld_xess_capture_depth(void)
++{
++    if (g_xess_depth_frame == g_ld_frames) return 1;
++    if (g_xess_zframe != g_ld_frames || !g_xess_zslot || g_xess_zslot > g.n_zdepths) return 0;
++    zdepth_t* depth = &g.zdepths[g_xess_zslot - 1u];
++    if (!zdepth_snapshot(g_xess_zslot) || !depth->snapshot || !depth->snapshot_valid) return 0;
++    if (!kz3_xess_capture_depth(g.list, depth->snapshot, depth->snapshot_state,
++                                depth->snapshot_w, depth->snapshot_h)) return 0;
++    g_xess_depth_frame = g_ld_frames;
++    return 1;
++}
++
++static void ld_xess_forget(void)
++{
++    kz3_xess_shutdown();
++    g_xess_context_w = g_xess_context_h = 0;
++    g_xess_context_generation++;
++    g_xess_last_dispatch_frame = UINT32_MAX;
++    g_xess_jitter_frame = UINT32_MAX;
++    g_xess_camera_frame = UINT32_MAX;
++    g_xess_zframe = UINT32_MAX;
++    g_xess_responsive_frame = UINT32_MAX;
++    g_xess_depth_frame = UINT32_MAX;
++    g_xess_compose_frame = UINT32_MAX;
++    g_xess_context_failed_frame = UINT32_MAX;
++    g_xess_jitter_hold = 0;
++    g_xess_have_last_camera = 0;
++    memset(&g_xess_opaque_capture, 0, sizeof g_xess_opaque_capture);
++    memset(&g_xess_pairing, 0, sizeof g_xess_pairing);
++}
+ #endif
+ /* patch 2113: KZ3_HUD_169 (=0 off, else on; one run) over display.ini hud_169 (rsx_live_draw_set_hud169; default on).
+  * Active only while the present stretches the buffer to a client that is not 16:9: KZ3_ASPECT=screen and Stretch now
+@@ -18043,6 +18207,18 @@ u32 rsx_live_draw_writeback_range(u32 location, u32 offset, u32 size)
+                                 g_ld_frames);
+                 }
+             }
++            if (g_dm_filter == RSX_DM_XESS &&
++                g_xess_camera_frame == g_ld_frames &&
++                kz3_xess_is_scene_target(
++                    sf->offset,
++                    sf->w,
++                    sf->h,
++                    sf->location == 0u,
++                    g.width,
++                    g.height))
++                ld_xess_capture_depth();
++            /* Patch 2140: no spatial AA on jittered samples; XeSS is the frame's anti-aliasing. */
++            if (!ld_xess_frame_jittered())
+ #endif
+             ld_host_aa(i);
+         }
+@@ -18237,6 +18413,11 @@ static ID3D12Resource* ld_xess_present(
+     const char* detail = NULL;
+     if (g_dm_filter != RSX_DM_XESS) {
+         g_xess_last_dispatch_frame = UINT32_MAX;
++        g_xess_have_last_camera = 0;
++        if (kz3_xess_has_context()) {   /* switched away: the memory goes back at once, not at exit */
++            ld_flush(LD_FLUSH_RETIRE_QUEUE);
++            if (g.ready) ld_xess_forget();
++        }
+         return NULL;
+     }
+ 
+@@ -18259,6 +18440,11 @@ static ID3D12Resource* ld_xess_present(
+         detail = "the scanout color is not the primary RGBA8 render image";
+         goto bypass;
+     }
++    if (g_xess_context_failed_frame == g_ld_frames) {   /* before the camera check: it would blame the camera */
++        reason = XESS_BYPASS_CONTEXT;
++        detail = kz3_xess_status();
++        goto bypass;
++    }
+     if (g_xess_zframe != g_ld_frames ||
+         !g_xess_zslot ||
+         g_xess_zslot > g.n_zdepths) {
+@@ -18268,16 +18454,7 @@ static ID3D12Resource* ld_xess_present(
+     }
+ 
+     {
+-        zdepth_t* depth = &g.zdepths[g_xess_zslot - 1u];
+         kz3_xess_camera_state camera = g_xess_camera;
+-        if (!zdepth_snapshot(g_xess_zslot) ||
+-            !depth->snapshot || !depth->snapshot_valid ||
+-            depth->snapshot_w != surface->w ||
+-            depth->snapshot_h != surface->h) {
+-            reason = XESS_BYPASS_DEPTH;
+-            detail = "the primary depth snapshot is unavailable or mismatched";
+-            goto bypass;
+-        }
+         if (g_xess_camera_frame != g_ld_frames ||
+             !(camera.flags & KZ3_XESS_CAMERA_PLANES_VALID) ||
+             (camera.flags & KZ3_XESS_CAMERA_MULTIPLE_VIEWS)) {
+@@ -18285,51 +18462,42 @@ static ID3D12Resource* ld_xess_present(
+             detail = "no coherent single-view camera and projection are available";
+             goto bypass;
+         }
+-        if (!ld_xess_ensure_context(xess_output_w, xess_output_h)) {
++        if (!ld_xess_ensure_context(xess_output_w, xess_output_h, 1)) {
+             reason = XESS_BYPASS_CONTEXT;
+             detail = kz3_xess_status();
+             goto bypass;
+         }
++        if (!ld_xess_capture_depth()) {
++            reason = XESS_BYPASS_DEPTH;
++            detail = "the primary depth snapshot is unavailable or mismatched";
++            goto bypass;
++        }
+ 
+-        D3D12_RESOURCE_BARRIER inputs[2] = {0};
+-        inputs[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+-        inputs[0].Transition.pResource = surface->tex;
+-        inputs[0].Transition.Subresource =
++        /* Patch 2140: the camera must have moved on by one flip since the last dispatch. The same flip again means no
++         * camera motion, whatever delta that state carries; a skipped flip means the history no longer lines up. */
++        const enum kz3_xess_camera_step step = kz3_xess_camera_step_from(
++            g_xess_have_last_camera, g_xess_last_camera_flip, camera.guest_flip);
++        if (step == KZ3_XESS_CAMERA_STEP_REPEAT) {
++            kz3_xess_camera_hold(&camera);
++            g_xess_camera_repeats++;
++        } else if (step == KZ3_XESS_CAMERA_STEP_JUMP) {
++            g_xess_camera_jumps++;
++        }
++
++        D3D12_RESOURCE_BARRIER input = {0};
++        input.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++        input.Transition.pResource = surface->tex;
++        input.Transition.Subresource =
+             D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+-        inputs[0].Transition.StateBefore =
++        input.Transition.StateBefore =
+             D3D12_RESOURCE_STATE_RENDER_TARGET;
+-        inputs[0].Transition.StateAfter =
+-            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+-        inputs[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+-        inputs[1].Transition.pResource = depth->snapshot;
+-        inputs[1].Transition.Subresource =
+-            D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+-        inputs[1].Transition.StateBefore =
+-            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+-        inputs[1].Transition.StateAfter =
++        input.Transition.StateAfter =
+             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+-        g.list->lpVtbl->ResourceBarrier(g.list, 2, inputs);
+-
+-        static LARGE_INTEGER frequency, previous_time;
+-        LARGE_INTEGER now;
+-        if (!frequency.QuadPart) QueryPerformanceFrequency(&frequency);
+-        QueryPerformanceCounter(&now);
+-        float frame_ms = 1000.0f / 30.0f;
+-        u32 timing_reset = 0;
+-        if (previous_time.QuadPart) {
+-            frame_ms = (float)((double)(now.QuadPart - previous_time.QuadPart) *
+-                               1000.0 / (double)frequency.QuadPart);
+-            if (!(frame_ms >= 1.0f && frame_ms <= 250.0f)) {
+-                frame_ms = 1000.0f / 30.0f;
+-                timing_reset = 1;
+-            }
+-        }
+-        previous_time = now;
++        g.list->lpVtbl->ResourceBarrier(g.list, 1, &input);
+ 
+         kz3_xess_camera_dispatch_desc dispatch = {0};
+         dispatch.command_list = g.list;
+         dispatch.color = surface->tex;
+-        dispatch.depth = depth->snapshot;
+         dispatch.camera = camera;
+         dispatch.render_width = surface->w;
+         dispatch.render_height = surface->h;
+@@ -18343,8 +18511,13 @@ static ID3D12Resource* ld_xess_present(
+             g_xess_responsive_frame == g_ld_frames &&
+             g_xess_responsive_context_generation ==
+                 g_xess_context_generation;
++        dispatch.use_hud_mask =
++            ld_xess_hud_mask_on() &&
++            g_xess_compose_frame == g_ld_frames &&
++            g_xess_compose_context_generation == g_xess_context_generation &&
++            g_xess_compose_resource == (uintptr_t)surface->tex;
+         dispatch.reset =
+-            timing_reset ||
++            step == KZ3_XESS_CAMERA_STEP_JUMP ||
+             g_xess_last_dispatch_frame == UINT32_MAX ||
+             g_ld_frames != g_xess_last_dispatch_frame + 1u ||
+             g_xess_context_generation !=
+@@ -18352,16 +18525,11 @@ static ID3D12Resource* ld_xess_present(
+         ID3D12Resource* result = kz3_xess_dispatch_camera(&dispatch);
+         LD_SM_INVALIDATE();
+ 
+-        inputs[0].Transition.StateBefore =
++        input.Transition.StateBefore =
+             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+-        inputs[0].Transition.StateAfter =
++        input.Transition.StateAfter =
+             D3D12_RESOURCE_STATE_RENDER_TARGET;
+-        inputs[1].Transition.StateBefore =
+-            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+-        inputs[1].Transition.StateAfter =
+-            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+-        g.list->lpVtbl->ResourceBarrier(g.list, 2, inputs);
+-        depth->snapshot_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
++        g.list->lpVtbl->ResourceBarrier(g.list, 1, &input);
+         if (!result) {
+             reason = XESS_BYPASS_DISPATCH;
+             detail = kz3_xess_status();
+@@ -18373,15 +18541,20 @@ static ID3D12Resource* ld_xess_present(
+         g_xess_last_dispatch_frame = g_ld_frames;
+         g_xess_last_dispatch_context_generation =
+             g_xess_context_generation;
++        g_xess_last_camera_flip = camera.guest_flip;
++        g_xess_have_last_camera = 1;
++        g_xess_jitter_hold = 0;
+         last_reason = XESS_BYPASS_NONE;
+         if (success_logs++ < 4)
+             fprintf(stderr,
+                     "[xess] frame %u: XeSS-SR 2.0.2 %ux%u -> %ux%u, "
+-                    "depth-aware camera motion, responsive=%s, "
+-                    "jitter %.4f/%.4f, reset=%u\n",
++                    "depth-aware camera motion, responsive=%s, hud=%s, "
++                    "mip bias %.3f, jitter %.4f/%.4f, reset=%u\n",
+                     g_ld_frames, surface->w, surface->h,
+                     *output_width, *output_height,
+                     dispatch.use_responsive_mask ? "generated" : "none",
++                    dispatch.use_hud_mask ? "masked" : "none",
++                    g_xess_mip_bias_fp / 256.0f,
+                     dispatch.jitter_x, dispatch.jitter_y,
+                     dispatch.reset ||
+                         (camera.flags & KZ3_XESS_CAMERA_RESET));
+@@ -18390,6 +18563,8 @@ static ID3D12Resource* ld_xess_present(
+ 
+ bypass:
+     g_xess_last_dispatch_frame = UINT32_MAX;
++    g_xess_have_last_camera = 0;
++    if (ld_xess_frame_jittered()) g_xess_jitter_hold = 1;   /* Bilinear must not show a jittered scene frame after frame */
+     if (reason != last_reason) {
+         last_reason = reason;
+         fprintf(stderr,
+@@ -19649,15 +19824,7 @@ void rsx_live_draw_shutdown(void)
+ {
+     if (!g.ready) {
+ #if defined(KZ3_XESS)
+-        kz3_xess_shutdown();
+-        g_xess_context_w = g_xess_context_h = 0;
+-        g_xess_context_generation++;
+-        g_xess_last_dispatch_frame = UINT32_MAX;
+-        g_xess_jitter_frame = UINT32_MAX;
+-        g_xess_camera_frame = UINT32_MAX;
+-        g_xess_zframe = UINT32_MAX;
+-        g_xess_responsive_frame = UINT32_MAX;
+-        memset(&g_xess_opaque_capture, 0, sizeof g_xess_opaque_capture);
++        ld_xess_forget();
+ #endif
+         return;
+     }
+@@ -19667,15 +19834,7 @@ void rsx_live_draw_shutdown(void)
+      * reclaims.) */
+     ld_flush(LD_FLUSH_SHUTDOWN);
+ #if defined(KZ3_XESS)
+-    kz3_xess_shutdown();
+-    g_xess_context_w = g_xess_context_h = 0;
+-    g_xess_context_generation++;
+-    g_xess_last_dispatch_frame = UINT32_MAX;
+-    g_xess_jitter_frame = UINT32_MAX;
+-    g_xess_camera_frame = UINT32_MAX;
+-    g_xess_zframe = UINT32_MAX;
+-    g_xess_responsive_frame = UINT32_MAX;
+-    memset(&g_xess_opaque_capture, 0, sizeof g_xess_opaque_capture);
++    ld_xess_forget();
+ #endif
+ #if defined(YZ_PERF_PROFILE)
+     fprintf(stderr,

@@ -4,8 +4,10 @@
 #include <math.h>
 
 /*
- * Depth-aware camera reprojection for KZ3's row-major pose:
+ * ENHANCEMENT: depth-aware camera reprojection for KZ3's row-major pose:
  * row 0 = right, row 1 = forward, row 2 = up, row 3 = position.
+ * ASSUMPTION: that axis naming is the adapter's reading of the pose, not recovered from the binary. xess.cpp logs the
+ * basis handedness once so a run can confirm it.
  */
 static inline float kz3_xess_dot3(const float* a, const float* b)
 {

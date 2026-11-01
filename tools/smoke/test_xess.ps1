@@ -47,12 +47,28 @@ if ($LASTEXITCODE -ne 0) {
     throw "XeSS smoke test compilation failed"
 }
 
+& $Compiler.Source `
+    -std=c++20 -O2 -Wall -Wextra -Werror `
+    -Wno-cast-function-type `
+    "-I$(Join-Path $Root 'port\kz3')" `
+    (Join-Path $Root "tools\smoke\test_xess_temporal.cpp") `
+    -ld3d12 -ldxgi -ldxguid `
+    -o (Join-Path $Out "test_xess_temporal.exe")
+if ($LASTEXITCODE -ne 0) {
+    throw "XeSS temporal test compilation failed"
+}
+
 $Exe = Join-Path $Out "test_xess.exe"
 $Runtime = Join-Path $Out "libxess.dll"
 $HeldRuntime = "$Runtime.held-$PID"
 & $Exe
 if ($LASTEXITCODE -ne 0) {
     throw "XeSS smoke test failed"
+}
+
+& (Join-Path $Out "test_xess_temporal.exe")
+if ($LASTEXITCODE -ne 0) {
+    throw "XeSS temporal test failed"
 }
 
 Move-Item -LiteralPath $Runtime -Destination $HeldRuntime

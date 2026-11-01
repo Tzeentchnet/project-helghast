@@ -7,5 +7,5 @@ mkdir -p "$O"
 CC="${CC:-cc}"
 "$CC" -std=c11 -Wall -Wextra -Werror -O2 \
   -I"$ROOT/port/kz3" "$ROOT/tools/smoke/test_xess_inputs.c" \
-  -o "$O/test_xess_inputs"
+  -lm -o "$O/test_xess_inputs"
 "$O/test_xess_inputs"

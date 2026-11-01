@@ -8,38 +8,20 @@
 typedef struct ID3D12Device ID3D12Device;
 typedef struct ID3D12GraphicsCommandList ID3D12GraphicsCommandList;
 typedef struct ID3D12Resource ID3D12Resource;
+typedef int D3D12_RESOURCE_STATES;
 #endif
+
+#include "xess_camera.h"
+
+/* ENHANCEMENT: the C boundary between the KZ3 XeSS-SR adapter (xess.cpp) and the patched renderer. Docs: docs/XESS.md. */
 
 #if defined(__cplusplus)
 extern "C" {
 #endif
 
-enum kz3_xess_camera_flags {
-    KZ3_XESS_CAMERA_CURRENT_VALID = 1u << 0,
-    KZ3_XESS_CAMERA_PREVIOUS_VALID = 1u << 1,
-    KZ3_XESS_CAMERA_PLANES_VALID = 1u << 2,
-    KZ3_XESS_CAMERA_RESET = 1u << 3,
-    KZ3_XESS_CAMERA_MULTIPLE_VIEWS = 1u << 4,
-};
-
-typedef struct kz3_xess_camera_state {
-    uint64_t guest_flip;
-    uint64_t view_id;
-    float current_pose[16];
-    float previous_pose[16];
-    float current_horizontal_fov;
-    float current_vertical_fov;
-    float previous_horizontal_fov;
-    float previous_vertical_fov;
-    float near_plane;
-    float far_plane;
-    uint32_t flags;
-} kz3_xess_camera_state;
-
 typedef struct kz3_xess_camera_dispatch_desc {
     ID3D12GraphicsCommandList* command_list;
     ID3D12Resource* color;
-    ID3D12Resource* depth;
     kz3_xess_camera_state camera;
     uint32_t render_width;
     uint32_t render_height;
@@ -49,6 +31,7 @@ typedef struct kz3_xess_camera_dispatch_desc {
     float jitter_y;
     uint32_t reset;
     uint32_t use_responsive_mask;
+    uint32_t use_hud_mask;
 } kz3_xess_camera_dispatch_desc;
 
 int kz3_xess_initialize(
@@ -57,6 +40,14 @@ int kz3_xess_initialize(
     uint32_t render_height,
     uint32_t output_width,
     uint32_t output_height);
+/* 1 when kz3_xess_initialize with these arguments would release a live context and its textures. */
+int kz3_xess_would_recreate(
+    ID3D12Device* device,
+    uint32_t render_width,
+    uint32_t render_height,
+    uint32_t output_width,
+    uint32_t output_height);
+int kz3_xess_has_context(void);
 int kz3_xess_get_jitter(
     uint64_t frame_index,
     uint32_t render_width,
@@ -74,6 +65,9 @@ void kz3_xess_note_camera_planes(
     float near_plane,
     float far_plane);
 int kz3_xess_get_camera(kz3_xess_camera_state* out_state);
+int kz3_xess_get_camera_for_flip(
+    uint64_t guest_flip,
+    kz3_xess_camera_state* out_state);
 int kz3_xess_capture_opaque_color(
     ID3D12GraphicsCommandList* command_list,
     ID3D12Resource* color,
@@ -84,10 +78,27 @@ int kz3_xess_capture_pre_upscale_color(
     ID3D12Resource* color,
     uint32_t width,
     uint32_t height);
+/* The display surface right after the 3D compose: the frame without its HUD. */
+int kz3_xess_capture_compose_color(
+    ID3D12GraphicsCommandList* command_list,
+    ID3D12Resource* color,
+    uint32_t width,
+    uint32_t height);
+/* The resolved R32_FLOAT scene depth; the resource is returned to depth_state. */
+int kz3_xess_capture_depth(
+    ID3D12GraphicsCommandList* command_list,
+    ID3D12Resource* depth,
+    D3D12_RESOURCE_STATES depth_state,
+    uint32_t width,
+    uint32_t height);
 ID3D12Resource* kz3_xess_dispatch_camera(
     const kz3_xess_camera_dispatch_desc* desc);
 void kz3_xess_shutdown(void);
 const char* kz3_xess_status(void);
+
+/* tools/smoke/test_xess.cpp reads these back to check what the compute passes wrote. */
+ID3D12Resource* kz3_xess_debug_motion_vectors(void);
+ID3D12Resource* kz3_xess_debug_responsive_mask(void);
 
 #if defined(__cplusplus)
 }

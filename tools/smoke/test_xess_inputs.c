@@ -77,6 +77,42 @@ int main(void)
         "capture pair rejects a recreated XeSS context",
         !kz3_xess_capture_pair_matches(&opaque, &pre));
 
+    check(
+        "exact 16:9 outputs match",
+        kz3_xess_aspect_matches(1280, 720, 1920, 1080) &&
+            kz3_xess_aspect_matches(1280, 720, 3840, 2160));
+    check(
+        "one output pixel of rounding matches",
+        kz3_xess_aspect_matches(1280, 720, 1366, 768) &&
+            kz3_xess_aspect_matches(1280, 720, 1778, 1000) &&
+            kz3_xess_aspect_matches(1280, 720, 1921, 1080) &&
+            kz3_xess_aspect_matches(1280, 720, 1920, 1081));
+    check(
+        "a real shape change does not",
+        !kz3_xess_aspect_matches(1280, 720, 1920, 1200) &&
+            !kz3_xess_aspect_matches(1280, 720, 2560, 1080) &&
+            !kz3_xess_aspect_matches(1280, 720, 1360, 768));
+
+    check(
+        "mip bias is log2(input / target) in 4.8 fixed point",
+        kz3_xess_mip_bias_fp(1280, 2560) == -256 &&
+            kz3_xess_mip_bias_fp(1280, 1920) == -150 &&
+            kz3_xess_mip_bias_fp(1280, 3840) == -406 &&
+            kz3_xess_mip_bias_fp(1280, 1280) == 0 &&
+            kz3_xess_mip_bias_fp(0, 1920) == 0);
+    check(
+        "bias adds to the guest's and keeps the rest of FILTER",
+        kz3_xess_filter_with_bias(0x05060100u, -256) == 0x05060000u &&
+            kz3_xess_filter_with_bias(0x05060000u, -150) ==
+                (0x05060000u | (0x2000u - 150u)));
+    check(
+        "a negative guest bias stays signed",
+        kz3_xess_filter_with_bias(0x1F00u, -256) == 0x1E00u);
+    check(
+        "bias saturates at the field's range",
+        kz3_xess_filter_with_bias(0x1000u, -256) == 0x1000u &&
+            kz3_xess_filter_with_bias(0x0FFFu, 256) == 0x0FFFu);
+
     printf("[test_xess_inputs] %s\n", failures ? "FAIL" : "PASS");
     return failures ? 1 : 0;
 }

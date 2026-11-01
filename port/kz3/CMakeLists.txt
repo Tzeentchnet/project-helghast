@@ -185,8 +185,16 @@ if(WIN32)
     target_sources(${PROJECT_NAME} PRIVATE xess.cpp)
     target_compile_definitions(${PROJECT_NAME} PRIVATE KZ3_XESS)
     target_compile_definitions(ps3recomp_runtime PRIVATE KZ3_XESS)
+    # Only the boundary headers reach the runtime, not all of port/kz3.
+    foreach(KZ3_XESS_HEADER xess.h xess_camera.h xess_inputs.h)
+        configure_file(
+            ${KZ3_XESS_HEADER}
+            kz3_xess_include/${KZ3_XESS_HEADER}
+            COPYONLY)
+    endforeach()
     target_include_directories(
-        ps3recomp_runtime PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+        ps3recomp_runtime PRIVATE
+        "${CMAKE_CURRENT_BINARY_DIR}/kz3_xess_include")
 endif()
 
 # KZ3 release: the player's EBOOT.elf linked into kz3.exe. The release's first-run build

@@ -3,7 +3,10 @@
 Commits `05c978d` and `085d371` against `main`, reviewed 2026-10-31. The review read the adapter, patch 2139, the
 renderer code around it, the release tooling and Intel's SDK 3.0.2 headers and developer guide, then ran the tests
 and a black-box probe on an RTX 5070 (driver 617.42). The game was not run, so in-game behaviour here comes from
-reading the code. No code was changed.
+reading the code. No code was changed by the review itself.
+
+**Status:** the fixes have since been made and are waiting for a game run. See [Fix record](#fix-record) at the end, which
+also has the test plan. The findings below are kept as written, so their line references are to commit `2c4fa7a`.
 
 ## Verdict
 
@@ -346,3 +349,121 @@ caches, so a clean machine could be slower. That init runs on the frame thread, 
 4. F5, F9, F11 and the documentation corrections.
 5. F6's HUD mask, F7 and F8.
 6. F10 and F13, then renumber for F12 at merge time.
+
+## Fix record
+
+Made 2026-10-31 in the commits after `2c4fa7a`, on `xesstest`, not pushed. Everything below passed the host and GPU tests
+listed here, but **none of it has run in the game**. Image quality and the behaviour of the game-facing parts are still
+unknown until the test plan is done. The in-game results in `docs/XESS.md` predate these changes.
+
+### What changed
+
+The renderer changes are in a new patch, [2140](port/patches/2140-xess-review-fixes.patch), because `AGENTS.md` asks for a
+new numbered patch and it can be dropped on its own terms: revert the commit as a whole, because the adapter API changed
+with it.
+
+| Finding | Status | What changed |
+|---|---|---|
+| F1 FXAA | Done | `ld_host_aa` is skipped on frames that were actually jittered. Frames outside XeSS keep FXAA |
+| F2 Mip bias | Done | `log2(input / target)` added to units with a mip chain on jittered draws. The jitter decision moved ahead of sampler table construction. `KZ3_XESS_MIP_BIAS` overrides it |
+| F3 Camera | Done, differently | See [Decisions](#decisions). Flip ring, self-calibrating pairing, same-flip and skipped-flip checks, `[xess] camera pairing` log lines, `KZ3_XESS_CAMERA_LAG` |
+| F4 Failure reason | Done, except one part | A draw-time init failure reports `kz3_xess_status()` before the camera check, and failures are latched per device and size. Not done: showing the fallback on the Options row |
+| F5 Project rules | Done | `ENHANCEMENT:`, `ASSUMPTION:` and `@0x` comments added; `scene_lr` checked for a preceding call; `features.tsv` updated with a new XeSS row and `FEATURES.md` regenerated |
+| F6 After post and HUD | Partly | The HUD mask is done: compose capture, zero motion and mask 1.0 on HUD pixels, `KZ3_XESS_HUD_MASK`. XeSS still runs after tone-mapping and post; moving it is the long-term work |
+| F7 Jitter in fallback | Done | A jittered frame that falls back holds jitter off, and the following frames go through XeSS unjittered until one succeeds |
+| F8 Aspect check | Done | One output pixel of tolerance. 1360x768 and 1920x1200 stay refused |
+| F9 VC++ runtime | Done | `requirements.md` and `XESS.md` updated; the load failure names the redistributable when the DLL exists but a dependency does not |
+| F10 Re-init | Done | The present path flushes first. A new `kz3_xess_would_recreate` replaces the `g_xess_context_w` test, so the skipped wait after a failed init is gone too |
+| F11 Licence bytes | Done | `-text` in `.gitattributes`; the blobs now hash to the pins |
+| F12 `fsrtest` | Partly | The `"fsr31"` test string is restored. Renumbering is left for merge time: this adds 2140, which `fsrtest` also uses |
+| F13 Coverage | Partly | Camera logic moved to `xess_camera.h` with a host test; GPU tests now read back mask and motion contents; temporal sign test added; handedness logged once. Not done: CI compiling `xess.cpp`, see below |
+| M1 `g_aa_tex` | Done by F1 | FXAA and XeSS no longer alternate its size |
+| M2, M3 Depth | Done | Depth is copied to an adapter texture at the scene copy, so no descriptor is rewritten per frame and later zeta writes cannot reach XeSS |
+| M4 Hitch reset | Done | Removed, with `frame_ms` |
+| M5 Jitter phases | Done | The clamp is now 72 |
+| M8 Context lifetime | Done | Switching the filter away releases the context at the next present |
+| M9 Pins | Done | `stage_xess.py` and `test_xess.ps1` read `assemble_payload.XESS_PINS`. The tables in the docs stay |
+| M10 Include path | Done | CMake copies the three boundary headers into a build folder and only that joins the runtime's path. `xess.h` keeps its name |
+| M6 Driver notice, M7 Native AA | Not changed | No small fix. M6 needs an in-game notice; M7 needs a decision on whether 720p output should use XeSS at all |
+| M11 Cut thresholds, M13 Lighting jitter | Not changed | Both need a game run to judge. M11 was marked for tuning after F3 |
+| M12 Mask jitter | Not changed | Low impact, and there is no cheap way to remove jitter from the captures. Now listed in `docs/XESS.md` |
+
+### Decisions
+
+- **F3 goes further than the review's order.** The review said to measure the flip offset in a run first. A fixed offset
+  would have been a guess, and getting the counters' base wrong could have disabled XeSS altogether, so the offset is
+  measured live: a frame's own camera is published before its draws, so the smallest `latest - consumed` over a window is
+  the true offset. It cannot do worse than the old "take the latest" unless the window's minimum is itself wrong, and
+  `KZ3_XESS_CAMERA_LAG=-1` restores the old behaviour exactly.
+- **The `scene_lr` check accepts `bl` or `bctrl`.** `bctrl` alone might have rejected the correct 1.14 address, and that
+  mistake could not be seen without a game run.
+- **The biased sampler is applied after the texture loop.** That leaves the patch 2136 memo holding the guest's sampler,
+  so it cannot serve a biased one to a HUD draw. Sampler cache exhaustion keeps the guest's sampler.
+- **`flake.nix` is unchanged.** Compiling `xess.cpp` in CI needs MinGW in `.#ci`, and there is no Nix here to evaluate that
+  change. `tools/smoke/test_xess_compile.sh` is in `host-tests.txt`, runs wherever a Windows-target compiler exists, and
+  prints SKIP in CI today. Adding `win.buildPackages.gcc` to the `ci` shell would turn it on; expect a larger CI closure.
+- **HUD pixels stay at XeSS's default 0.8 clamp.** Intel says to raise it only after validating the result, which needs
+  the game.
+
+One mistake along the way: a shell escaping error put a stray carriage return in `test_xess.ps1`. It was caught from an
+oversized diff and amended before anything left this machine, so it is not in the history.
+
+### What was run
+
+On Windows, RTX 5070, driver 617.42, g++ 16 from WinLibs.
+
+| Check | Result |
+|---|---|
+| All 292 patches from the pinned commit, with autocrlf off | Apply; the renderer is byte-identical to the edited tree |
+| `rsx_live_draw.c` on its own, with and without `KZ3_XESS` | Compiles; no XeSS symbols without it; every adapter function it calls is defined |
+| `xess.cpp` with `-Wall -Wextra -Werror` | Clean |
+| `main.cpp` with a stub for the generated `ppu_recomp.h` | Parses to the end; 7 errors, all missing lifted symbols, none on lines this branch touches. Not a real compile |
+| `test_xess_motion`, `test_xess_inputs`, `test_xess_camera`, `test_xess_compile`, `test_display_mode` | Pass |
+| Each fix's bug put back in a scratch copy (7 mutations) | All 7 caught by the intended check |
+| `test_xess.ps1`, the whole script | Pass: mask reads 204/0/255, motion is zero under the HUD box and non-zero elsewhere, near-16:9 re-init works, missing and wrong DLL fall back |
+| `test_xess_temporal` | Pass, same numbers as the review's probe |
+| `test_stage_xess`, `test_assemble_payload`, `test_pack_zip`, `test_launch`, `test_licenses_match`, `tools/port_ui_table.py`, `tools/features.py --check` | Pass |
+| The CMake `configure_file` loop in a small test project | Works |
+
+Not run:
+
+- the game
+- the D3D12 debug layer (the optional Windows Graphics Tools feature is not installed here, so the new barriers are
+  checked by reading and clean GPU runs only)
+- the bundled clang
+- Proton
+- Intel and AMD GPUs
+- shellcheck
+- `tools/run-host-tests.sh` and the Nix shells
+- `flake.nix`
+
+### Test plan
+
+The build needs the full patch set: `work/ps3recomp-patched` currently holds the FSR patches, so it must be regenerated
+before building.
+
+Run gameplay at 1920x1080 with `KZ3_DISPLAY_FILTER=xess`, then read the log. In order:
+
+1. `[xess] camera basis: cross(right, forward).up = +1.000`. **If this says -1, stop:** the pose axes are not what the
+   reprojection assumes and motion will be wrong everywhere.
+2. `[xess] frame N: XeSS-SR 2.0.2 ...` should say `responsive=generated, hud=masked, mip bias -0.585`.
+3. `[xess] camera pairing: ...` lines. While playing, `used` should rise by one a frame, usually one behind `latest` if
+   the PPU runs ahead. `misses`, `repeats` and `jumps` should stay near zero. `repeats` rising during pause is expected.
+
+Then look at the picture:
+
+| Check | Expect | If not |
+|---|---|---|
+| Turn the camera with the HUD up | Text stays crisp, with no smear | The compose capture is not catching the HUD |
+| Whole picture looks unaccumulated or aliased | Should not happen | Run with `KZ3_XESS_HUD_MASK=0`. If that fixes it, the first display draw is not the whole compose |
+| Compare with `KZ3_XESS_MIP_BIAS=0` | Sharper textures, no new shimmer | Try a smaller bias such as `-0.3` |
+| Slow steady pan | No ghosting on static geometry | Try `KZ3_XESS_CAMERA_LAG=1`, then `-1` to compare with the old behaviour |
+| Camera cuts in cutscenes | No ghost frame after the cut | Tune M11 |
+| Pause menu over the scene | No drift or smear on the frozen image | Report the `repeats` count |
+| Drag the window size, Alt+Enter | No device removal or crash; a brief stall per size is expected | Keep the log |
+| Options: XeSS to Bilinear and back | Clean switch; XeSS comes back | Keep the log |
+| Non-default Brightness | Correct brightness | Keep the log |
+| 1366x768 window | XeSS engages | Keep the log |
+| Rename `libxess.dll` | One log line naming the real cause, picture stays Bilinear, no shimmer | Keep the log |
+
+If Graphics Tools can be installed, one run with the D3D12 debug layer would check the new barriers.

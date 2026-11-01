@@ -1,3 +1,7 @@
+/*
+ * ENHANCEMENT: the XeSS-SR adapter. The PS3 game has no temporal upscaler; this path is opt-in and Bilinear stays the
+ * default. Written from Intel's public XeSS SDK 3.0.2 developer guide and headers. Design and limits: docs/XESS.md.
+ */
 #include "xess.h"
 
 #include <algorithm>
@@ -13,6 +17,7 @@
 #include <d3dcompiler.h>
 
 #include "xess_api.h"
+#include "xess_inputs.h"
 
 namespace {
 
@@ -36,6 +41,9 @@ struct XessState {
     ID3D12Resource* output = nullptr;
     ID3D12Resource* opaque_color = nullptr;
     ID3D12Resource* pre_upscale_color = nullptr;
+    ID3D12Resource* compose_color = nullptr;
+    ID3D12Resource* present_color = nullptr;
+    ID3D12Resource* scene_depth = nullptr;
     ID3D12Resource* responsive_mask = nullptr;
     ID3D12DescriptorHeap* motion_heap = nullptr;
     ID3D12RootSignature* motion_root_signature = nullptr;
@@ -47,15 +55,26 @@ struct XessState {
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     D3D12_RESOURCE_STATES pre_upscale_color_state =
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    D3D12_RESOURCE_STATES compose_color_state =
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    D3D12_RESOURCE_STATES present_color_state =
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    D3D12_RESOURCE_STATES scene_depth_state =
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     bool motion_is_compute_read = false;
     bool output_is_pixel_read = false;
     bool responsive_is_compute_read = false;
+    bool depth_captured = false;
     uint64_t capture_serial = 0;
     uint64_t opaque_capture_serial = 0;
     uint64_t pre_upscale_capture_serial = 0;
     uint64_t dispatch_count = 0;
     uint64_t history_reset_count = 0;
     ID3D12Resource* capture_source = nullptr;
+    /* The last arguments a context could not be built for: a permanent failure is not retried every frame. */
+    bool failed = false;
+    ID3D12Device* failed_device = nullptr;
+    uint32_t failed_size[4] = {};
     std::string status = "XeSS-SR has not been initialized";
 };
 
@@ -63,12 +82,8 @@ XessState g_xess;
 
 struct CameraBridge {
     std::mutex mutex;
-    kz3_xess_camera_state state{};
-    kz3_xess_camera_state pending{};
-    uint64_t plane_flip = UINT64_MAX;
-    float near_plane = 0.0f;
-    float far_plane = 0.0f;
-    bool planes_ambiguous = false;
+    kz3_xess_camera_bridge bridge{};
+    bool handedness_logged = false;
 };
 
 CameraBridge g_camera;
@@ -162,6 +177,9 @@ void destroy_resources_locked()
     release(g_xess.motion_root_signature);
     release(g_xess.motion_heap);
     release(g_xess.responsive_mask);
+    release(g_xess.scene_depth);
+    release(g_xess.present_color);
+    release(g_xess.compose_color);
     release(g_xess.pre_upscale_color);
     release(g_xess.opaque_color);
     release(g_xess.output);
@@ -169,9 +187,13 @@ void destroy_resources_locked()
     g_xess.opaque_color_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     g_xess.pre_upscale_color_state =
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    g_xess.compose_color_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    g_xess.present_color_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    g_xess.scene_depth_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     g_xess.motion_is_compute_read = false;
     g_xess.output_is_pixel_read = false;
     g_xess.responsive_is_compute_read = false;
+    g_xess.depth_captured = false;
     g_xess.capture_serial = 0;
     g_xess.opaque_capture_serial = 0;
     g_xess.pre_upscale_capture_serial = 0;
@@ -349,10 +371,14 @@ bool create_motion_pipeline_locked(ID3D12Device* device)
         "};\n"
         "RWTexture2D<float2> motion : register(u0);\n"
         "Texture2D<float> sceneDepth : register(t0);\n"
+        "Texture2D<float> responsive : register(t1);\n"
         "[numthreads(8, 8, 1)]\n"
         "void main(uint3 id : SV_DispatchThreadID) {\n"
         "  uint2 size = (uint2)sizeJitter.xy;\n"
         "  if (id.x >= size.x || id.y >= size.y) return;\n"
+        "  if (responsive.Load(int3(id.xy, 0)) > 0.9) {\n"
+        "    motion[id.xy] = 0.0; return;\n"
+        "  }\n"
         "  float depth = sceneDepth.Load(int3(id.xy, 0));\n"
         "  if (depth < 0.0 || depth > 1.0) {\n"
         "    motion[id.xy] = 0.0; return;\n"
@@ -391,7 +417,7 @@ bool create_motion_pipeline_locked(ID3D12Device* device)
     ranges[0].NumDescriptors = 1;
     ranges[0].OffsetInDescriptorsFromTableStart = 0;
     ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    ranges[1].NumDescriptors = 1;
+    ranges[1].NumDescriptors = 2;
     ranges[1].OffsetInDescriptorsFromTableStart = 1;
     const bool pipeline_ok = create_compute_pipeline(
         device,
@@ -408,7 +434,7 @@ bool create_motion_pipeline_locked(ID3D12Device* device)
 
     D3D12_DESCRIPTOR_HEAP_DESC heap{};
     heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    heap.NumDescriptors = 2;
+    heap.NumDescriptors = 3;
     heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     const HRESULT hr = device->CreateDescriptorHeap(
         &heap,
@@ -426,22 +452,29 @@ bool create_motion_pipeline_locked(ID3D12Device* device)
 
 bool create_responsive_pipeline_locked(ID3D12Device* device)
 {
+    /* ASSUMPTION: experimental heuristics, not game-derived. 0.2 separates translucent composition from noise; 0.006 is
+     * about 1.5/255, so only bytes the HUD actually changed count (the compose and present images are otherwise
+     * identical). 1.0 marks a HUD pixel for the motion pass; XeSS clamps the mask to its default 0.8 either way. */
     static constexpr char source[] =
         "cbuffer Responsive : register(b0) {\n"
-        "  uint width; uint height; uint enabled;\n"
+        "  uint width; uint height; uint translucent; uint hud;\n"
         "};\n"
         "RWTexture2D<float> responsive : register(u0);\n"
         "Texture2D<float4> opaqueColor : register(t0);\n"
         "Texture2D<float4> completeColor : register(t1);\n"
+        "Texture2D<float4> composeColor : register(t2);\n"
+        "Texture2D<float4> presentColor : register(t3);\n"
+        "float biggest(float3 d) { return max(d.r, max(d.g, d.b)); }\n"
         "[numthreads(8, 8, 1)]\n"
         "void main(uint3 id : SV_DispatchThreadID) {\n"
         "  if (id.x >= width || id.y >= height) return;\n"
-        "  if (!enabled) { responsive[id.xy] = 0.0; return; }\n"
-        "  float3 a = opaqueColor.Load(int3(id.xy, 0)).rgb;\n"
-        "  float3 b = completeColor.Load(int3(id.xy, 0)).rgb;\n"
-        "  float3 d = abs(a - b);\n"
-        "  float difference = max(d.r, max(d.g, d.b));\n"
-        "  responsive[id.xy] = difference >= 0.2 ? 0.8 : 0.0;\n"
+        "  int3 p = int3(id.xy, 0);\n"
+        "  float value = 0.0;\n"
+        "  if (translucent != 0 && biggest(abs(opaqueColor.Load(p).rgb -\n"
+        "      completeColor.Load(p).rgb)) >= 0.2) value = 0.8;\n"
+        "  if (hud != 0 && biggest(abs(composeColor.Load(p).rgb -\n"
+        "      presentColor.Load(p).rgb)) >= 0.006) value = 1.0;\n"
+        "  responsive[id.xy] = value;\n"
         "}\n";
 
     ID3DBlob* shader = nullptr;
@@ -454,14 +487,14 @@ bool create_responsive_pipeline_locked(ID3D12Device* device)
     ranges[0].NumDescriptors = 1;
     ranges[0].OffsetInDescriptorsFromTableStart = 0;
     ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    ranges[1].NumDescriptors = 2;
+    ranges[1].NumDescriptors = 4;
     ranges[1].OffsetInDescriptorsFromTableStart = 1;
     const bool pipeline_ok = create_compute_pipeline(
         device,
         shader,
         ranges,
         2,
-        3,
+        4,
         &g_xess.responsive_root_signature,
         &g_xess.responsive_pipeline);
     release(shader);
@@ -471,7 +504,7 @@ bool create_responsive_pipeline_locked(ID3D12Device* device)
 
     D3D12_DESCRIPTOR_HEAP_DESC heap{};
     heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    heap.NumDescriptors = 3;
+    heap.NumDescriptors = 5;
     heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     const HRESULT hr = device->CreateDescriptorHeap(
         &heap,
@@ -522,6 +555,24 @@ bool create_resources_locked(
             device,
             render_width,
             render_height,
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+            &g_xess.compose_color) ||
+        !create_texture(
+            device,
+            render_width,
+            render_height,
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+            &g_xess.present_color) ||
+        !create_texture(
+            device,
+            render_width,
+            render_height,
+            DXGI_FORMAT_R32_FLOAT,
+            &g_xess.scene_depth) ||
+        !create_texture(
+            device,
+            render_width,
+            render_height,
             DXGI_FORMAT_R8_UNORM,
             &g_xess.responsive_mask) ||
         !create_motion_pipeline_locked(device) ||
@@ -530,18 +581,32 @@ bool create_resources_locked(
         return false;
     }
 
+    /* Every descriptor points at a texture this adapter owns, so none is rewritten while a frame is in flight. */
+    const UINT descriptor_size =
+        device->GetDescriptorHandleIncrementSize(
+            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    D3D12_CPU_DESCRIPTOR_HANDLE motion_handle =
+        g_xess.motion_heap->GetCPUDescriptorHandleForHeapStart();
     D3D12_UNORDERED_ACCESS_VIEW_DESC motion_uav{};
     motion_uav.Format = DXGI_FORMAT_R16G16_FLOAT;
     motion_uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
     device->CreateUnorderedAccessView(
-        g_xess.motion_vectors,
-        nullptr,
-        &motion_uav,
-        g_xess.motion_heap->GetCPUDescriptorHandleForHeapStart());
+        g_xess.motion_vectors, nullptr, &motion_uav, motion_handle);
+    D3D12_SHADER_RESOURCE_VIEW_DESC depth_srv{};
+    depth_srv.Format = DXGI_FORMAT_R32_FLOAT;
+    depth_srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    depth_srv.Shader4ComponentMapping =
+        D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    depth_srv.Texture2D.MipLevels = 1;
+    motion_handle.ptr += descriptor_size;
+    device->CreateShaderResourceView(
+        g_xess.scene_depth, &depth_srv, motion_handle);
+    D3D12_SHADER_RESOURCE_VIEW_DESC mask_srv = depth_srv;
+    mask_srv.Format = DXGI_FORMAT_R8_UNORM;
+    motion_handle.ptr += descriptor_size;
+    device->CreateShaderResourceView(
+        g_xess.responsive_mask, &mask_srv, motion_handle);
 
-    const UINT descriptor_size =
-        device->GetDescriptorHandleIncrementSize(
-            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     D3D12_CPU_DESCRIPTOR_HANDLE handle =
         g_xess.responsive_heap->GetCPUDescriptorHandleForHeapStart();
     D3D12_UNORDERED_ACCESS_VIEW_DESC responsive_uav{};
@@ -562,6 +627,12 @@ bool create_resources_locked(
     handle.ptr += descriptor_size;
     device->CreateShaderResourceView(
         g_xess.pre_upscale_color, &color_srv, handle);
+    handle.ptr += descriptor_size;
+    device->CreateShaderResourceView(
+        g_xess.compose_color, &color_srv, handle);
+    handle.ptr += descriptor_size;
+    device->CreateShaderResourceView(
+        g_xess.present_color, &color_srv, handle);
     return true;
 }
 
@@ -579,6 +650,39 @@ bool texture_matches(
            desc.Width == width && desc.Height == height &&
            desc.DepthOrArraySize == 1 && desc.MipLevels == 1 &&
            desc.Format == format && desc.SampleDesc.Count == 1;
+}
+
+/* Copies source (left in source_state) into destination and leaves destination readable by compute and XeSS. */
+void copy_texture_locked(
+    ID3D12GraphicsCommandList* command_list,
+    ID3D12Resource* source,
+    D3D12_RESOURCE_STATES source_state,
+    ID3D12Resource* destination,
+    D3D12_RESOURCE_STATES& destination_state)
+{
+    D3D12_RESOURCE_BARRIER barriers[2]{};
+    barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barriers[0].Transition.pResource = source;
+    barriers[0].Transition.Subresource =
+        D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barriers[0].Transition.StateBefore = source_state;
+    barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barriers[1].Transition.pResource = destination;
+    barriers[1].Transition.Subresource =
+        D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barriers[1].Transition.StateBefore = destination_state;
+    barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+    command_list->ResourceBarrier(2, barriers);
+    command_list->CopyResource(destination, source);
+
+    barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    barriers[0].Transition.StateAfter = source_state;
+    barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    barriers[1].Transition.StateAfter =
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    command_list->ResourceBarrier(2, barriers);
+    destination_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 }
 
 bool capture_color_locked(
@@ -606,41 +710,13 @@ bool capture_color_locked(
         return false;
     }
 
-    ID3D12Resource* destination =
-        opaque ? g_xess.opaque_color : g_xess.pre_upscale_color;
-    D3D12_RESOURCE_STATES& destination_state =
+    copy_texture_locked(
+        command_list,
+        color,
+        D3D12_RESOURCE_STATE_RENDER_TARGET,
+        opaque ? g_xess.opaque_color : g_xess.pre_upscale_color,
         opaque ? g_xess.opaque_color_state :
-                 g_xess.pre_upscale_color_state;
-    D3D12_RESOURCE_BARRIER before[2]{};
-    before[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    before[0].Transition.pResource = color;
-    before[0].Transition.Subresource =
-        D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    before[0].Transition.StateBefore =
-        D3D12_RESOURCE_STATE_RENDER_TARGET;
-    before[0].Transition.StateAfter =
-        D3D12_RESOURCE_STATE_COPY_SOURCE;
-    before[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    before[1].Transition.pResource = destination;
-    before[1].Transition.Subresource =
-        D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    before[1].Transition.StateBefore = destination_state;
-    before[1].Transition.StateAfter =
-        D3D12_RESOURCE_STATE_COPY_DEST;
-    command_list->ResourceBarrier(2, before);
-    command_list->CopyResource(destination, color);
-
-    before[0].Transition.StateBefore =
-        D3D12_RESOURCE_STATE_COPY_SOURCE;
-    before[0].Transition.StateAfter =
-        D3D12_RESOURCE_STATE_RENDER_TARGET;
-    before[1].Transition.StateBefore =
-        D3D12_RESOURCE_STATE_COPY_DEST;
-    before[1].Transition.StateAfter =
-        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-    command_list->ResourceBarrier(2, before);
-    destination_state =
-        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+                 g_xess.pre_upscale_color_state);
 
     if (opaque) {
         if (!++g_xess.capture_serial) {
@@ -660,7 +736,8 @@ bool generate_responsive_locked(
     ID3D12GraphicsCommandList* command_list,
     uint32_t width,
     uint32_t height,
-    bool enabled)
+    bool translucent,
+    bool hud)
 {
     if (!g_xess.context || !command_list ||
         !g_xess.responsive_mask || !g_xess.opaque_color ||
@@ -670,7 +747,7 @@ bool generate_responsive_locked(
         set_status("XeSS-SR responsive-mask resources are unavailable");
         return false;
     }
-    if (enabled &&
+    if (translucent &&
         (!g_xess.opaque_capture_serial ||
          g_xess.pre_upscale_capture_serial !=
              g_xess.opaque_capture_serial)) {
@@ -693,8 +770,8 @@ bool generate_responsive_locked(
         g_xess.responsive_is_compute_read = false;
     }
 
-    const UINT constants[3] = {
-        width, height, enabled ? 1u : 0u};
+    const UINT constants[4] = {
+        width, height, translucent ? 1u : 0u, hud ? 1u : 0u};
     ID3D12DescriptorHeap* heaps[] = {g_xess.responsive_heap};
     command_list->SetDescriptorHeaps(1, heaps);
     command_list->SetPipelineState(g_xess.responsive_pipeline);
@@ -704,7 +781,7 @@ bool generate_responsive_locked(
         0,
         g_xess.responsive_heap->GetGPUDescriptorHandleForHeapStart());
     command_list->SetComputeRoot32BitConstants(
-        1, 3, constants, 0);
+        1, 4, constants, 0);
     command_list->Dispatch(
         (width + 7u) / 8u,
         (height + 7u) / 8u,
@@ -777,6 +854,17 @@ bool load_runtime_locked()
         LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
             LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!g_xess.module) {
+        const DWORD error = GetLastError();
+        if (error == ERROR_MOD_NOT_FOUND &&
+            GetFileAttributesW(path.data()) != INVALID_FILE_ATTRIBUTES) {
+            /* The file is there, so one of its imports is not: Intel's guide lists the VC++ runtime DLLs. */
+            set_status(
+                "libxess.dll is present but a dependency is missing; "
+                "install the Microsoft Visual C++ Redistributable 14.40 "
+                "or later");
+            return false;
+        }
+        SetLastError(error);
         set_win32_status("loading libxess.dll beside the executable");
         return false;
     }
@@ -850,8 +938,40 @@ bool dimensions_valid(
         output_height < render_height) {
         return false;
     }
-    return static_cast<uint64_t>(render_width) * output_height ==
-           static_cast<uint64_t>(render_height) * output_width;
+    return kz3_xess_aspect_matches(
+               render_width,
+               render_height,
+               output_width,
+               output_height) != 0;
+}
+
+bool same_failure_locked(
+    ID3D12Device* device,
+    uint32_t render_width,
+    uint32_t render_height,
+    uint32_t output_width,
+    uint32_t output_height)
+{
+    return g_xess.failed && g_xess.failed_device == device &&
+           g_xess.failed_size[0] == render_width &&
+           g_xess.failed_size[1] == render_height &&
+           g_xess.failed_size[2] == output_width &&
+           g_xess.failed_size[3] == output_height;
+}
+
+void note_failure_locked(
+    ID3D12Device* device,
+    uint32_t render_width,
+    uint32_t render_height,
+    uint32_t output_width,
+    uint32_t output_height)
+{
+    g_xess.failed = true;
+    g_xess.failed_device = device;
+    g_xess.failed_size[0] = render_width;
+    g_xess.failed_size[1] = render_height;
+    g_xess.failed_size[2] = output_width;
+    g_xess.failed_size[3] = output_height;
 }
 
 enum kz3_xess_quality quality_for_scale(
@@ -904,48 +1024,30 @@ const char* quality_name(enum kz3_xess_quality quality)
     }
 }
 
-bool pose_valid(const float pose[16])
+bool scale_supported(
+    uint32_t render_width,
+    uint32_t render_height,
+    uint32_t output_width,
+    uint32_t output_height)
 {
-    for (unsigned i = 0; i < 16; ++i) {
-        if (!std::isfinite(pose[i])) {
-            return false;
-        }
-    }
-    for (unsigned row = 0; row < 3; ++row) {
-        const float* v = pose + row * 4;
-        const float length_squared =
-            v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
-        if (!(length_squared > 0.81f && length_squared < 1.21f)) {
-            return false;
-        }
-    }
-    return true;
+    return static_cast<uint64_t>(output_width) <=
+               static_cast<uint64_t>(render_width) * 3u &&
+           static_cast<uint64_t>(output_height) <=
+               static_cast<uint64_t>(render_height) * 3u;
 }
 
-bool camera_cut(
-    const float previous[16],
-    const float current[16])
+bool context_matches_locked(
+    ID3D12Device* device,
+    uint32_t render_width,
+    uint32_t render_height,
+    uint32_t output_width,
+    uint32_t output_height)
 {
-    const float dx = current[12] - previous[12];
-    const float dy = current[13] - previous[13];
-    const float dz = current[14] - previous[14];
-    if (dx * dx + dy * dy + dz * dz > 25.0f) {
-        return true;
-    }
-    const float forward_dot = std::clamp(
-        previous[4] * current[4] +
-            previous[5] * current[5] +
-            previous[6] * current[6],
-        -1.0f,
-        1.0f);
-    return forward_dot < std::cos(1.5f);
-}
-
-bool projection_plane_matches(float left, float right)
-{
-    const float scale =
-        std::max(1.0f, std::max(std::fabs(left), std::fabs(right)));
-    return std::fabs(left - right) <= scale * 1.0e-4f;
+    return g_xess.context && g_xess.device == device &&
+           g_xess.render_width == render_width &&
+           g_xess.render_height == render_height &&
+           g_xess.output_width == output_width &&
+           g_xess.output_height == output_height;
 }
 
 float halton(uint64_t index, uint32_t base)
@@ -960,20 +1062,40 @@ float halton(uint64_t index, uint32_t base)
     return value;
 }
 
-void publish_camera_locked(bool force)
+}  // namespace
+
+extern "C" int kz3_xess_would_recreate(
+    ID3D12Device* device,
+    uint32_t render_width,
+    uint32_t render_height,
+    uint32_t output_width,
+    uint32_t output_height)
 {
-    const uint32_t ready =
-        KZ3_XESS_CAMERA_CURRENT_VALID |
-        KZ3_XESS_CAMERA_PLANES_VALID;
-    if ((g_camera.pending.flags & ready) == ready ||
-        (force &&
-         (g_camera.pending.flags &
-          KZ3_XESS_CAMERA_CURRENT_VALID))) {
-        g_camera.state = g_camera.pending;
-    }
+    std::lock_guard<std::mutex> lock(g_xess.mutex);
+    return g_xess.context && device &&
+           dimensions_valid(
+               render_width,
+               render_height,
+               output_width,
+               output_height) &&
+           scale_supported(
+               render_width,
+               render_height,
+               output_width,
+               output_height) &&
+           !context_matches_locked(
+               device,
+               render_width,
+               render_height,
+               output_width,
+               output_height);
 }
 
-}  // namespace
+extern "C" int kz3_xess_has_context(void)
+{
+    std::lock_guard<std::mutex> lock(g_xess.mutex);
+    return g_xess.context != nullptr;
+}
 
 extern "C" int kz3_xess_initialize(
     ID3D12Device* device,
@@ -994,22 +1116,38 @@ extern "C" int kz3_xess_initialize(
             "with the same aspect ratio");
         return 0;
     }
-    if (static_cast<uint64_t>(output_width) >
-            static_cast<uint64_t>(render_width) * 3u ||
-        static_cast<uint64_t>(output_height) >
-            static_cast<uint64_t>(render_height) * 3u) {
+    if (!scale_supported(
+            render_width,
+            render_height,
+            output_width,
+            output_height)) {
         set_status("XeSS-SR output exceeds the supported 3x scale");
         return 0;
     }
-    if (g_xess.context && g_xess.device == device &&
-        g_xess.render_width == render_width &&
-        g_xess.render_height == render_height &&
-        g_xess.output_width == output_width &&
-        g_xess.output_height == output_height) {
+    if (context_matches_locked(
+            device,
+            render_width,
+            render_height,
+            output_width,
+            output_height)) {
         return 1;
+    }
+    if (same_failure_locked(
+            device,
+            render_width,
+            render_height,
+            output_width,
+            output_height)) {
+        return 0;
     }
 
     destroy_context_locked();
+    note_failure_locked(
+        device,
+        render_width,
+        render_height,
+        output_width,
+        output_height);
     if (!load_runtime_locked()) {
         return 0;
     }
@@ -1102,6 +1240,7 @@ extern "C" int kz3_xess_initialize(
     g_xess.output_width = output_width;
     g_xess.output_height = output_height;
     g_xess.quality = quality;
+    g_xess.failed = false;
     set_status(
         "XeSS-SR API 2.0.2 %s initialized for %ux%u -> %ux%u",
         quality_name(quality),
@@ -1128,11 +1267,12 @@ extern "C" int kz3_xess_get_jitter(
     const double scale =
         static_cast<double>(output_width) /
         static_cast<double>(render_width);
+    /* Intel's guide: 8 phases times the squared scale, which is 72 at the 3x limit. */
     const uint32_t phase_count = std::clamp(
         static_cast<uint32_t>(
             std::ceil(8.0 * scale * scale)),
         8u,
-        64u);
+        72u);
     const uint64_t index = frame_index % phase_count + 1u;
     *out_x = halton(index, 2) - 0.5f;
     *out_y = halton(index, 3) - 0.5f;
@@ -1146,7 +1286,7 @@ extern "C" void kz3_xess_note_camera(
     float horizontal_fov,
     float vertical_fov)
 {
-    if (!pose || !pose_valid(pose) ||
+    if (!pose || !kz3_xess_pose_valid(pose) ||
         !std::isfinite(horizontal_fov) ||
         !std::isfinite(vertical_fov) ||
         horizontal_fov <= 0.0f || horizontal_fov >= 3.13f ||
@@ -1154,66 +1294,21 @@ extern "C" void kz3_xess_note_camera(
         return;
     }
     std::lock_guard<std::mutex> lock(g_camera.mutex);
-    kz3_xess_camera_state& pending = g_camera.pending;
-    if ((pending.flags & KZ3_XESS_CAMERA_CURRENT_VALID) &&
-        guest_flip < pending.guest_flip) {
-        return;
+    if (!g_camera.handedness_logged) {
+        g_camera.handedness_logged = true;
+        fprintf(
+            stderr,
+            "[xess] camera basis: cross(right, forward).up = %+.3f "
+            "(the reprojection expects +1)\n",
+            static_cast<double>(kz3_xess_pose_handedness(pose)));
     }
-    if ((pending.flags & KZ3_XESS_CAMERA_CURRENT_VALID) &&
-        pending.guest_flip == guest_flip) {
-        if (pending.view_id != view_id) {
-            pending.flags |= KZ3_XESS_CAMERA_MULTIPLE_VIEWS |
-                             KZ3_XESS_CAMERA_RESET;
-            publish_camera_locked(true);
-            return;
-        }
-        memcpy(
-            pending.current_pose,
-            pose,
-            sizeof(pending.current_pose));
-        pending.current_horizontal_fov = horizontal_fov;
-        pending.current_vertical_fov = vertical_fov;
-        publish_camera_locked(false);
-        return;
-    }
-
-    kz3_xess_camera_state next{};
-    next.guest_flip = guest_flip;
-    next.view_id = view_id;
-    memcpy(next.current_pose, pose, sizeof(next.current_pose));
-    next.current_horizontal_fov = horizontal_fov;
-    next.current_vertical_fov = vertical_fov;
-    next.flags =
-        KZ3_XESS_CAMERA_CURRENT_VALID |
-        KZ3_XESS_CAMERA_RESET;
-
-    const kz3_xess_camera_state& state = g_camera.state;
-    if ((state.flags & KZ3_XESS_CAMERA_CURRENT_VALID) &&
-        state.guest_flip + 1u == guest_flip &&
-        state.view_id == view_id &&
-        !(state.flags & KZ3_XESS_CAMERA_MULTIPLE_VIEWS)) {
-        memcpy(
-            next.previous_pose,
-            state.current_pose,
-            sizeof(next.previous_pose));
-        next.previous_horizontal_fov =
-            state.current_horizontal_fov;
-        next.previous_vertical_fov =
-            state.current_vertical_fov;
-        next.flags |= KZ3_XESS_CAMERA_PREVIOUS_VALID;
-        if (!camera_cut(next.previous_pose, next.current_pose)) {
-            next.flags &= ~KZ3_XESS_CAMERA_RESET;
-        }
-    }
-
-    if (g_camera.plane_flip == guest_flip &&
-        !g_camera.planes_ambiguous) {
-        next.near_plane = g_camera.near_plane;
-        next.far_plane = g_camera.far_plane;
-        next.flags |= KZ3_XESS_CAMERA_PLANES_VALID;
-    }
-    pending = next;
-    publish_camera_locked(false);
+    kz3_xess_bridge_note_camera(
+        &g_camera.bridge,
+        guest_flip,
+        view_id,
+        pose,
+        horizontal_fov,
+        vertical_fov);
 }
 
 extern "C" void kz3_xess_note_camera_planes(
@@ -1228,35 +1323,8 @@ extern "C" void kz3_xess_note_camera_planes(
         return;
     }
     std::lock_guard<std::mutex> lock(g_camera.mutex);
-    if (g_camera.plane_flip != UINT64_MAX &&
-        guest_flip < g_camera.plane_flip) {
-        return;
-    }
-    if (g_camera.plane_flip != guest_flip) {
-        g_camera.plane_flip = guest_flip;
-        g_camera.near_plane = near_plane;
-        g_camera.far_plane = far_plane;
-        g_camera.planes_ambiguous = false;
-    } else if (!projection_plane_matches(
-                   g_camera.near_plane, near_plane) ||
-               !projection_plane_matches(
-                   g_camera.far_plane, far_plane)) {
-        g_camera.planes_ambiguous = true;
-    }
-    if ((g_camera.pending.flags &
-         KZ3_XESS_CAMERA_CURRENT_VALID) &&
-        g_camera.pending.guest_flip == guest_flip) {
-        if (g_camera.planes_ambiguous) {
-            g_camera.pending.flags &=
-                ~KZ3_XESS_CAMERA_PLANES_VALID;
-        } else {
-            g_camera.pending.near_plane = g_camera.near_plane;
-            g_camera.pending.far_plane = g_camera.far_plane;
-            g_camera.pending.flags |=
-                KZ3_XESS_CAMERA_PLANES_VALID;
-        }
-        publish_camera_locked(g_camera.planes_ambiguous);
-    }
+    kz3_xess_bridge_note_planes(
+        &g_camera.bridge, guest_flip, near_plane, far_plane);
 }
 
 extern "C" int kz3_xess_get_camera(
@@ -1266,9 +1334,21 @@ extern "C" int kz3_xess_get_camera(
         return 0;
     }
     std::lock_guard<std::mutex> lock(g_camera.mutex);
-    *out_state = g_camera.state;
+    *out_state = g_camera.bridge.state;
     return
         (out_state->flags & KZ3_XESS_CAMERA_CURRENT_VALID) != 0;
+}
+
+extern "C" int kz3_xess_get_camera_for_flip(
+    uint64_t guest_flip,
+    kz3_xess_camera_state* out_state)
+{
+    if (!out_state) {
+        return 0;
+    }
+    std::lock_guard<std::mutex> lock(g_camera.mutex);
+    return kz3_xess_bridge_find(
+        &g_camera.bridge, guest_flip, out_state);
 }
 
 extern "C" int kz3_xess_capture_opaque_color(
@@ -1293,12 +1373,61 @@ extern "C" int kz3_xess_capture_pre_upscale_color(
         command_list, color, width, height, false);
 }
 
+extern "C" int kz3_xess_capture_compose_color(
+    ID3D12GraphicsCommandList* command_list,
+    ID3D12Resource* color,
+    uint32_t width,
+    uint32_t height)
+{
+    std::lock_guard<std::mutex> lock(g_xess.mutex);
+    if (!g_xess.context || !command_list ||
+        !texture_matches(
+            color, width, height, DXGI_FORMAT_R8G8B8A8_UNORM) ||
+        width != g_xess.render_width ||
+        height != g_xess.render_height) {
+        set_status("XeSS-SR compose capture received invalid state or color");
+        return 0;
+    }
+    copy_texture_locked(
+        command_list,
+        color,
+        D3D12_RESOURCE_STATE_RENDER_TARGET,
+        g_xess.compose_color,
+        g_xess.compose_color_state);
+    return 1;
+}
+
+extern "C" int kz3_xess_capture_depth(
+    ID3D12GraphicsCommandList* command_list,
+    ID3D12Resource* depth,
+    D3D12_RESOURCE_STATES depth_state,
+    uint32_t width,
+    uint32_t height)
+{
+    std::lock_guard<std::mutex> lock(g_xess.mutex);
+    if (!g_xess.context || !command_list ||
+        !texture_matches(depth, width, height, DXGI_FORMAT_R32_FLOAT) ||
+        width != g_xess.render_width ||
+        height != g_xess.render_height) {
+        set_status("XeSS-SR depth capture received invalid state or depth");
+        return 0;
+    }
+    copy_texture_locked(
+        command_list,
+        depth,
+        depth_state,
+        g_xess.scene_depth,
+        g_xess.scene_depth_state);
+    g_xess.depth_captured = true;
+    return 1;
+}
+
 extern "C" ID3D12Resource* kz3_xess_dispatch_camera(
     const kz3_xess_camera_dispatch_desc* desc)
 {
     std::lock_guard<std::mutex> lock(g_xess.mutex);
     if (!desc || !desc->command_list || !desc->color ||
-        !desc->depth || !g_xess.context ||
+        !g_xess.context ||
         !g_xess.motion_vectors || !g_xess.output ||
         !g_xess.motion_heap || !g_xess.motion_root_signature ||
         !g_xess.motion_pipeline) {
@@ -1327,23 +1456,22 @@ extern "C" ID3D12Resource* kz3_xess_dispatch_camera(
             desc->color,
             desc->render_width,
             desc->render_height,
-            DXGI_FORMAT_R8G8B8A8_UNORM) ||
-        !texture_matches(
-            desc->depth,
-            desc->render_width,
-            desc->render_height,
-            DXGI_FORMAT_R32_FLOAT)) {
+            DXGI_FORMAT_R8G8B8A8_UNORM)) {
         set_status(
-            "XeSS-SR camera dispatch color or depth format is incompatible");
+            "XeSS-SR camera dispatch color format is incompatible");
+        return nullptr;
+    }
+    if (!g_xess.depth_captured) {
+        set_status("XeSS-SR camera dispatch has no captured scene depth");
         return nullptr;
     }
 
     const bool has_previous =
         (desc->camera.flags &
          KZ3_XESS_CAMERA_PREVIOUS_VALID) != 0;
-    if (!pose_valid(desc->camera.current_pose) ||
+    if (!kz3_xess_pose_valid(desc->camera.current_pose) ||
         (has_previous &&
-         !pose_valid(desc->camera.previous_pose)) ||
+         !kz3_xess_pose_valid(desc->camera.previous_pose)) ||
         !std::isfinite(desc->camera.near_plane) ||
         !std::isfinite(desc->camera.far_plane) ||
         !(desc->camera.near_plane > 0.0f) ||
@@ -1411,6 +1539,29 @@ extern "C" ID3D12Resource* kz3_xess_dispatch_camera(
     g_xess.motion_is_compute_read = false;
     g_xess.output_is_pixel_read = false;
 
+    /* The mask runs first: the motion pass reads its HUD pixels. */
+    const bool use_hud = desc->use_hud_mask != 0;
+    if (use_hud) {
+        copy_texture_locked(
+            desc->command_list,
+            desc->color,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            g_xess.present_color,
+            g_xess.present_color_state);
+    }
+    const bool responsive_ok = generate_responsive_locked(
+        desc->command_list,
+        desc->render_width,
+        desc->render_height,
+        desc->use_responsive_mask != 0,
+        use_hud);
+    g_xess.opaque_capture_serial = 0;
+    g_xess.pre_upscale_capture_serial = 0;
+    g_xess.capture_source = nullptr;
+    if (!responsive_ok) {
+        return nullptr;
+    }
+
     float constants[44]{};
     memcpy(
         constants,
@@ -1437,20 +1588,6 @@ extern "C" ID3D12Resource* kz3_xess_dispatch_camera(
     constants[39] = desc->jitter_y;
     constants[40] = desc->camera.near_plane;
     constants[41] = desc->camera.far_plane;
-
-    D3D12_SHADER_RESOURCE_VIEW_DESC depth_srv{};
-    depth_srv.Format = DXGI_FORMAT_R32_FLOAT;
-    depth_srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    depth_srv.Shader4ComponentMapping =
-        D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    depth_srv.Texture2D.MipLevels = 1;
-    D3D12_CPU_DESCRIPTOR_HANDLE depth_handle =
-        g_xess.motion_heap->GetCPUDescriptorHandleForHeapStart();
-    depth_handle.ptr +=
-        g_xess.device->GetDescriptorHandleIncrementSize(
-            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-    g_xess.device->CreateShaderResourceView(
-        desc->depth, &depth_srv, depth_handle);
 
     ID3D12DescriptorHeap* heaps[] = {g_xess.motion_heap};
     desc->command_list->SetDescriptorHeaps(1, heaps);
@@ -1479,24 +1616,10 @@ extern "C" ID3D12Resource* kz3_xess_dispatch_camera(
     desc->command_list->ResourceBarrier(1, &motion_ready);
     g_xess.motion_is_compute_read = true;
 
-    if (!generate_responsive_locked(
-            desc->command_list,
-            desc->render_width,
-            desc->render_height,
-            desc->use_responsive_mask != 0)) {
-        g_xess.opaque_capture_serial = 0;
-        g_xess.pre_upscale_capture_serial = 0;
-        g_xess.capture_source = nullptr;
-        return nullptr;
-    }
-    g_xess.opaque_capture_serial = 0;
-    g_xess.pre_upscale_capture_serial = 0;
-    g_xess.capture_source = nullptr;
-
     kz3_xess_d3d12_execute_params execute{};
     execute.color_texture = desc->color;
     execute.velocity_texture = g_xess.motion_vectors;
-    execute.depth_texture = desc->depth;
+    execute.depth_texture = g_xess.scene_depth;
     execute.responsive_pixel_mask_texture =
         g_xess.responsive_mask;
     execute.output_texture = g_xess.output;
@@ -1519,6 +1642,7 @@ extern "C" ID3D12Resource* kz3_xess_dispatch_camera(
     }
     const int result = g_xess.functions.execute(
         g_xess.context, desc->command_list, &execute);
+    g_xess.depth_captured = false;
     if (result != KZ3_XESS_SUCCESS) {
         set_status(
             "XeSS-SR dispatch failed (%d: %s)",
@@ -1563,6 +1687,7 @@ extern "C" void kz3_xess_shutdown(void)
         g_xess.module = nullptr;
         g_xess.functions = {};
     }
+    g_xess.failed = false;
     set_status("XeSS-SR is shut down");
 }
 
@@ -1572,4 +1697,16 @@ extern "C" const char* kz3_xess_status(void)
     std::lock_guard<std::mutex> lock(g_xess.mutex);
     copy = g_xess.status;
     return copy.c_str();
+}
+
+extern "C" ID3D12Resource* kz3_xess_debug_motion_vectors(void)
+{
+    std::lock_guard<std::mutex> lock(g_xess.mutex);
+    return g_xess.motion_vectors;
+}
+
+extern "C" ID3D12Resource* kz3_xess_debug_responsive_mask(void)
+{
+    std::lock_guard<std::mutex> lock(g_xess.mutex);
+    return g_xess.responsive_mask;
 }

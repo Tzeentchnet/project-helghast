@@ -31,7 +31,8 @@ The port is a native Windows x64 program using Direct3D 12. Developed on Linux a
 | **Controller** | keyboard and mouse | a gamepad (XInput; DualShock/DualSense through Steam Input) | Keyboard and mouse work in the menus and in levels (mouse look; sensitivity under Options > Mouse), except in a few dialogs. Button prompts follow the device in use: PS3, PS4/PS5, Xbox or keyboard keys (Options > Controller > Button prompts). Split-screen co-op needs a second controller for the second player; keyboard and mouse as one of the two players is planned. |
 
 The optional experimental XeSS-SR filter has its own GPU and driver requirements. Intel documents Shader Model 6.4
-and DP4a support; the port verifies context creation and otherwise falls back to Bilinear. See [XESS.md](XESS.md).
+and DP4a support, Windows 10 build 19043 or later, and the Microsoft Visual C++ Redistributable 14.40.33810 or later
+(not shipped here); the port verifies context creation and otherwise falls back to Bilinear. See [XESS.md](XESS.md).
 
 Current measured performance (2026-10-27, RTX 4060, under Proton): the menus run at the game's own 30 fps; levels
 run at about 16-22 frames/s depending on the chapter (a busy Frozen Shores window about 22-23), so these rows are still provisional. They will be replaced by

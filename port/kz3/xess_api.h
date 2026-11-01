@@ -15,7 +15,7 @@ typedef struct ID3D12Resource ID3D12Resource;
 #endif
 
 /*
- * Minimal XeSS-SR 2.0 ABI declarations used for dynamic loading. The public
+ * ENHANCEMENT: minimal XeSS-SR 2.0 ABI declarations used for dynamic loading. The public
  * API names and layouts are documented by Intel's XeSS SDK 3.0.2 developer
  * guide and headers:
  * https://github.com/intel/xess/tree/v3.0.2

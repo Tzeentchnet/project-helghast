@@ -2,6 +2,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #include <d3d12.h>
@@ -77,12 +78,21 @@ bool create_texture(
         "CreateCommittedResource(texture)");
 }
 
+struct Box {
+    UINT left, top, right, bottom;
+};
+
+/* The opaque-to-final change the responsive mask should see, and where the HUD draws. */
+constexpr Box kTranslucentBox = {0, 0, 640, 720};
+constexpr Box kHudBox = {800, 100, 900, 200};
+
+/* box: the pixels that get the alternate color. */
 bool upload_input(
     ID3D12Device* device,
     ID3D12GraphicsCommandList* list,
     ID3D12Resource* texture,
     std::vector<ID3D12Resource*>& uploads,
-    bool alternate_color = false)
+    const Box* box = nullptr)
 {
     const D3D12_RESOURCE_DESC texture_desc = texture->GetDesc();
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
@@ -137,9 +147,12 @@ bool upload_input(
             unsigned char* row =
                 pixels + y * footprint.Footprint.RowPitch;
             for (UINT64 x = 0; x < texture_desc.Width; ++x) {
-                row[x * 4 + 0] = alternate_color ? 224 : 48;
-                row[x * 4 + 1] = alternate_color ? 48 : 112;
-                row[x * 4 + 2] = alternate_color ? 80 : 208;
+                const bool alternate =
+                    box && x >= box->left && x < box->right &&
+                    y >= box->top && y < box->bottom;
+                row[x * 4 + 0] = alternate ? 224 : 48;
+                row[x * 4 + 1] = alternate ? 48 : 112;
+                row[x * 4 + 2] = alternate ? 80 : 208;
                 row[x * 4 + 3] = 255;
             }
         }
@@ -169,6 +182,94 @@ bool upload_input(
     list->CopyTextureRegion(
         &destination, 0, 0, 0, &source, nullptr);
     uploads.push_back(upload);
+    return true;
+}
+
+/* Records a copy of an adapter texture (left NON_PIXEL_SHADER_RESOURCE by the dispatch) into a readback buffer. */
+bool copy_for_readback(
+    ID3D12Device* device,
+    ID3D12GraphicsCommandList* list,
+    ID3D12Resource* texture,
+    ID3D12Resource** out_buffer)
+{
+    const D3D12_RESOURCE_DESC desc = texture->GetDesc();
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    UINT rows = 0;
+    UINT64 row_bytes = 0;
+    UINT64 total_bytes = 0;
+    device->GetCopyableFootprints(
+        &desc, 0, 1, 0, &footprint, &rows, &row_bytes, &total_bytes);
+    D3D12_HEAP_PROPERTIES heap{};
+    heap.Type = D3D12_HEAP_TYPE_READBACK;
+    D3D12_RESOURCE_DESC buffer{};
+    buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    buffer.Width = total_bytes;
+    buffer.Height = 1;
+    buffer.DepthOrArraySize = 1;
+    buffer.MipLevels = 1;
+    buffer.SampleDesc.Count = 1;
+    buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    if (!check(
+            device->CreateCommittedResource(
+                &heap,
+                D3D12_HEAP_FLAG_NONE,
+                &buffer,
+                D3D12_RESOURCE_STATE_COPY_DEST,
+                nullptr,
+                IID_ID3D12Resource,
+                reinterpret_cast<void**>(out_buffer)),
+            "CreateCommittedResource(debug readback)")) {
+        return false;
+    }
+    D3D12_RESOURCE_BARRIER ready{};
+    ready.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    ready.Transition.pResource = texture;
+    ready.Transition.Subresource =
+        D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    ready.Transition.StateBefore =
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    ready.Transition.StateAfter =
+        D3D12_RESOURCE_STATE_COPY_SOURCE;
+    list->ResourceBarrier(1, &ready);
+    D3D12_TEXTURE_COPY_LOCATION source{};
+    source.pResource = texture;
+    source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    D3D12_TEXTURE_COPY_LOCATION destination{};
+    destination.pResource = *out_buffer;
+    destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    destination.PlacedFootprint = footprint;
+    list->CopyTextureRegion(
+        &destination, 0, 0, 0, &source, nullptr);
+    return true;
+}
+
+bool read_texel(
+    ID3D12Device* device,
+    ID3D12Resource* texture,
+    ID3D12Resource* buffer,
+    UINT x,
+    UINT y,
+    UINT bytes,
+    void* out_texel)
+{
+    const D3D12_RESOURCE_DESC desc = texture->GetDesc();
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    UINT rows = 0;
+    UINT64 row_bytes = 0;
+    UINT64 total_bytes = 0;
+    device->GetCopyableFootprints(
+        &desc, 0, 1, 0, &footprint, &rows, &row_bytes, &total_bytes);
+    D3D12_RANGE range{0, static_cast<SIZE_T>(total_bytes)};
+    void* mapped = nullptr;
+    if (!check(buffer->Map(0, &range, &mapped), "Map(debug readback)")) {
+        return false;
+    }
+    memcpy(
+        out_texel,
+        static_cast<const unsigned char*>(mapped) + footprint.Offset +
+            y * footprint.Footprint.RowPitch + x * bytes,
+        bytes);
+    buffer->Unmap(0, nullptr);
     return true;
 }
 
@@ -238,6 +339,14 @@ int main(int argc, char** argv)
                 stderr);
             return 1;
         }
+        if (!kz3_xess_get_camera_for_flip(101, &camera) ||
+            camera.guest_flip != 101 ||
+            kz3_xess_get_camera_for_flip(103, &camera)) {
+            fputs(
+                "[test_xess] camera flip lookup returned the wrong state\n",
+                stderr);
+            return 1;
+        }
         puts("[test_xess] projection-plane coherence: ok");
     }
 
@@ -251,6 +360,8 @@ int main(int argc, char** argv)
     ID3D12Resource* scene = nullptr;
     ID3D12Resource* overlay = nullptr;
     ID3D12Resource* readback = nullptr;
+    ID3D12Resource* motion_readback = nullptr;
+    ID3D12Resource* mask_readback = nullptr;
     ID3D12Resource* xess_output = nullptr;
     std::vector<ID3D12Resource*> uploads;
     HANDLE completion_event = nullptr;
@@ -290,6 +401,20 @@ int main(int argc, char** argv)
             output_width,
             output_height)) {
         if (expect_unsupported) {
+            const std::string first_status = kz3_xess_status();
+            if (kz3_xess_initialize(
+                    device,
+                    render_width,
+                    render_height,
+                    output_width,
+                    output_height) ||
+                first_status != kz3_xess_status()) {
+                fputs(
+                    "[test_xess] a repeated failure did not keep its "
+                    "reason\n",
+                    stderr);
+                goto done;
+            }
             printf(
                 "[test_xess] unavailable-runtime fallback: ok (%s)\n",
                 kz3_xess_status());
@@ -313,6 +438,29 @@ int main(int argc, char** argv)
             kz3_xess_status());
         goto done;
     }
+    if (kz3_xess_would_recreate(
+            device,
+            render_width,
+            render_height,
+            output_width,
+            output_height) ||
+        !kz3_xess_would_recreate(
+            device, render_width, render_height, 1366, 768) ||
+        !kz3_xess_initialize(
+            device, render_width, render_height, 1366, 768) ||
+        !kz3_xess_initialize(
+            device,
+            render_width,
+            render_height,
+            output_width,
+            output_height)) {
+        fprintf(
+            stderr,
+            "[test_xess] near-16:9 output or re-init failed: %s\n",
+            kz3_xess_status());
+        goto done;
+    }
+    puts("[test_xess] near-16:9 output and re-init: ok");
 
     if (!check(
             device->CreateCommandQueue(
@@ -367,10 +515,10 @@ int main(int argc, char** argv)
             D3D12_RESOURCE_FLAG_NONE,
             D3D12_RESOURCE_STATE_COPY_DEST,
             &overlay) ||
-        !upload_input(device, list, color, uploads) ||
+        !upload_input(device, list, color, uploads, &kHudBox) ||
         !upload_input(device, list, depth, uploads) ||
         !upload_input(device, list, scene, uploads) ||
-        !upload_input(device, list, overlay, uploads, true)) {
+        !upload_input(device, list, overlay, uploads, &kTranslucentBox)) {
         goto done;
     }
 
@@ -397,7 +545,15 @@ int main(int argc, char** argv)
     }
 
     if (!kz3_xess_capture_opaque_color(
-            list, scene, render_width, render_height)) {
+            list, scene, render_width, render_height) ||
+        !kz3_xess_capture_compose_color(
+            list, scene, render_width, render_height) ||
+        !kz3_xess_capture_depth(
+            list,
+            depth,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            render_width,
+            render_height)) {
         fprintf(stderr, "[test_xess] %s\n", kz3_xess_status());
         goto done;
     }
@@ -438,7 +594,6 @@ int main(int argc, char** argv)
         kz3_xess_camera_dispatch_desc dispatch{};
         dispatch.command_list = list;
         dispatch.color = color;
-        dispatch.depth = depth;
         dispatch.camera.guest_flip = 1;
         dispatch.camera.view_id = 1;
         dispatch.camera.flags =
@@ -450,7 +605,7 @@ int main(int argc, char** argv)
             dispatch.camera.current_pose[i * 4 + i] = 1.0f;
             dispatch.camera.previous_pose[i * 4 + i] = 1.0f;
         }
-        dispatch.camera.current_pose[13] = 0.25f;
+        dispatch.camera.current_pose[12] = 0.25f;
         dispatch.camera.current_horizontal_fov = 1.4f;
         dispatch.camera.current_vertical_fov = 0.9f;
         dispatch.camera.previous_horizontal_fov = 1.4f;
@@ -465,6 +620,7 @@ int main(int argc, char** argv)
         dispatch.jitter_y = jitter_y;
         dispatch.reset = 1;
         dispatch.use_responsive_mask = 1;
+        dispatch.use_hud_mask = 1;
         xess_output = kz3_xess_dispatch_camera(&dispatch);
     }
     if (!xess_output) {
@@ -542,6 +698,18 @@ int main(int argc, char** argv)
         destination.PlacedFootprint = footprint;
         list->CopyTextureRegion(
             &destination, 0, 0, 0, &source, nullptr);
+    }
+    if (!copy_for_readback(
+            device,
+            list,
+            kz3_xess_debug_motion_vectors(),
+            &motion_readback) ||
+        !copy_for_readback(
+            device,
+            list,
+            kz3_xess_debug_responsive_mask(),
+            &mask_readback)) {
+        goto done;
     }
 
     if (!check(list->Close(), "Close(command list)")) {
@@ -636,6 +804,47 @@ int main(int argc, char** argv)
             static_cast<unsigned long long>(nonblack),
             output_width * output_height);
     }
+    {
+        /* What the compute passes wrote: translucent 0.8 on the changed half, nothing on the rest, 1.0 under the HUD
+         * box, and camera motion everywhere except under the box. */
+        unsigned char mask_translucent = 0;
+        unsigned char mask_clear = 255;
+        unsigned char mask_hud = 0;
+        uint16_t motion_scene[2] = {};
+        uint16_t motion_hud[2] = {1, 1};
+        ID3D12Resource* mask = kz3_xess_debug_responsive_mask();
+        ID3D12Resource* motion = kz3_xess_debug_motion_vectors();
+        if (!read_texel(
+                device, mask, mask_readback, 100, 360, 1, &mask_translucent) ||
+            !read_texel(
+                device, mask, mask_readback, 1000, 360, 1, &mask_clear) ||
+            !read_texel(
+                device, mask, mask_readback, 850, 150, 1, &mask_hud) ||
+            !read_texel(
+                device, motion, motion_readback, 1000, 360, 4, motion_scene) ||
+            !read_texel(
+                device, motion, motion_readback, 850, 150, 4, motion_hud)) {
+            goto done;
+        }
+        if (mask_translucent < 203 || mask_translucent > 205 ||
+            mask_clear != 0 || mask_hud != 255 ||
+            motion_scene[0] == 0 ||
+            motion_hud[0] != 0 || motion_hud[1] != 0) {
+            fprintf(
+                stderr,
+                "[test_xess] mask %u/%u/%u (want 204/0/255), motion "
+                "0x%04X,0x%04X scene, 0x%04X,0x%04X hud\n",
+                mask_translucent,
+                mask_clear,
+                mask_hud,
+                motion_scene[0],
+                motion_scene[1],
+                motion_hud[0],
+                motion_hud[1]);
+            goto done;
+        }
+        puts("[test_xess] mask and motion contents: ok");
+    }
     printf(
         "[test_xess] XeSS-SR 2.0.2 depth-motion and responsive-mask "
         "dispatch: ok (jitter %.6f, %.6f)\n",
@@ -652,6 +861,8 @@ done:
         release(upload);
     }
     release(readback);
+    release(motion_readback);
+    release(mask_readback);
     release(overlay);
     release(scene);
     release(depth);
