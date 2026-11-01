@@ -140,7 +140,7 @@ static void test_scaling(void)
               rsx_dm_parse_filter("NEAREST") == RSX_DM_NEAREST &&
               rsx_dm_parse_filter("xess") == RSX_DM_XESS &&
               rsx_dm_parse_filter("XeSS-SR") == RSX_DM_XESS &&
-              rsx_dm_parse_filter("fsr31") < 0 &&
+              rsx_dm_parse_filter("fsr") < 0 &&
               rsx_dm_parse_scaling(NULL) < 0,
           "scaling/filter names");
     CHECK(rect_is(rsx_dm_rect_for(1280, 720, 1920, 1200, RSX_DM_STRETCH, RSX_DM_BILINEAR), 0, 0, 1920, 1200),

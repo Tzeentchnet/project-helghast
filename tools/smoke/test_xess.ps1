@@ -5,7 +5,8 @@ param(
 $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $Out = Join-Path $Root "build\smoke-host\xess"
-$ExpectedHash = "251659DD84A3E84DE67C886A4186E01F3ECA49B00641906FE38BB6B807E5D5B7"
+$PinScript = "import sys; sys.path.insert(0, sys.argv[1]); import assemble_payload as a; print(a.XESS_PINS[a.XESS_DEST[0]][1])"
+$ExpectedHash = (& python -c $PinScript (Join-Path $Root "tools\release")).Trim().ToUpperInvariant()
 
 if (-not $Dll) {
     $Dll = Join-Path $Root "work\release\xess\libxess.dll"

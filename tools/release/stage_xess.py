@@ -19,11 +19,8 @@ import assemble_payload as ap  # noqa: E402
 
 SDK_VERSION = "3.0.2"
 SR_API_VERSION = "2.0.2"
-PINS = {
-    "dll": (77795704, "251659dd84a3e84de67c886a4186e01f3eca49b00641906fe38bb6b807e5d5b7"),
-    "license": (4194, "784be42c39a4a4d03cf85d88e15e59d75828fca773ce45b8dbfffbd7eaf208df"),
-    "notices": (35788, "e8d8899dbfc4de0e8ca25560be9358e03c1405d7c956d20a1838c3c709b9b51c"),
-}
+# The pins live in assemble_payload.XESS_PINS; the payload gate and this staging step must agree.
+PINS = dict(zip(("dll", "license", "notices"), (ap.XESS_PINS[dest] for dest in ap.XESS_DEST)))
 
 
 def sha256(path):
