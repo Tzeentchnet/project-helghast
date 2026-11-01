@@ -22,6 +22,9 @@ There are two ways to get a build:
   three; only setup and running differ (see [Building on macOS](#building-on-macos) and
   [Building from source on Windows (WSL2)](#building-from-source-on-windows-wsl2)).
 
+Native SPU gates are inserted during the SPU lift, not by recompiling the runtime alone. The first-run payload includes
+`re/spu/native_gates.tsv`; changing that table invalidates the lift fingerprint so the generated code is rebuilt.
+
 ## What you need
 
 From your own copy of the game (details and sizes in [requirements.md](requirements.md); what each folder must hold and what the first-run check prints: [GETTING-FILES.md](GETTING-FILES.md)):

@@ -98,6 +98,7 @@ RULES = [
     ("re/data/spu_map_114.tsv", "re/data/spu_map_114.tsv", "file", {}),
     ("re/data/spu_seeds_114.tsv", "re/data/spu_seeds_114.tsv", "file", {}),
     ("re/data/spu_coverage_seeds.tsv", "re/data/spu_coverage_seeds.tsv", "file", {}),
+    ("re/spu/native_gates.tsv", "re/spu/native_gates.tsv", "file", {}),
     # the per-version PPU lift tables firstrun.py picks by EBOOT version (overrides_file, fixups_file; tools/lift.sh's order)
     ("re/data/overrides/ppu_overrides-114.txt", "re/data/overrides/ppu_overrides-114.txt", "file", {}),
     ("re/data/overrides/ppu_lift_fixups-114.txt", "re/data/overrides/ppu_lift_fixups-114.txt", "file", {}),

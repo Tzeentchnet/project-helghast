@@ -102,6 +102,9 @@ tools/spu/test_spu_rmask.sh
 tools/spu/test_spu_lscold.sh
 tools/spu/test_spu_shufh.sh
 tools/smoke/test_tex_lru.sh
+tools/smoke/test_vtx_gpu.sh
+tools/smoke/test_vtx_dev.sh
+tools/smoke/test_wb_gpu.sh
 tools/release/test_stage_sdl3.py
 tools/release/test_stage_xess.py
 tools/spu/test_lr_lastcheck.sh
@@ -167,3 +170,5 @@ tools/spu/test_r121_irq_b2b.sh
 tools/spu/test_r122_native_blend.sh
 tools/spu/test_r123_native_lp.sh
 tools/spu/test_r125_native_lp.sh
+tools/spu/test_r127_native_default.sh
+tools/spu/test_native_gates.py

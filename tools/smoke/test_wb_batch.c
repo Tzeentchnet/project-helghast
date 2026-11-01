@@ -13,6 +13,7 @@
  * two textures with different patterns, so a write-back that read the GPU's result too early shows the previous
  * frame's pattern. Negative control: LD_WB_UNSAFE_NOWAIT=1 (the write-back does not wait for its copies) must FAIL;
  * LD_SUBMIT_CHUNK=0 is the pre-2029 path. The run prints the no-wait submit count.
+ * KZ3_EXPECT_WB_GPU=1/0 asserts that the GPU packing dispatch did/did not run.
  * Usage: test_wb_batch.exe [frames] [extra] (default 60 150; exit 0 and "[test_wb_batch] PASS"). Built by
  * tools/smoke/build-host.sh, run under Proton with tools/proton-test.sh (GPU lock).
  */
@@ -41,6 +42,7 @@ extern u32   cellGcmResolveLocated(int local, u32 offset);
 extern u32   cellGcmResolveIO(u32 offset);
 extern void  rsx_live_draw_present(u32 buffer_id);
 extern void  rsx_live_draw_debug_writeback_stats(double* us_total, u32* batches, u32* surfaces, u32* gpu_waits);
+extern void  rsx_live_draw_debug_gpu_offload_stats(u64 out[2]);
 extern unsigned long long rsx_live_draw_debug_chunk_submits(void);   /* patch 2029 */
 
 uint8_t* vm_base = NULL;
@@ -308,6 +310,14 @@ int main(int argc, char** argv)
            b1 - b0, s1 - s0, w1 - w0, us1 - us0, (b1 - b0) ? (us1 - us0) / (b1 - b0) : 0.0);
     printf("[test_wb_batch] extra draws %d/frame, LD_SUBMIT_CHUNK=%s: %llu no-wait submits\n", extra,
            getenv("LD_SUBMIT_CHUNK") ? getenv("LD_SUBMIT_CHUNK") : "(unset)", rsx_live_draw_debug_chunk_submits());
+    u64 gpu[2]; rsx_live_draw_debug_gpu_offload_stats(gpu);
+    const char* expect_gpu = getenv("KZ3_EXPECT_WB_GPU");
+    printf("[test_wb_batch] GPU packing dispatches=%llu\n", (unsigned long long)gpu[1]);
+    if (expect_gpu && ((strcmp(expect_gpu, "1") && strcmp(expect_gpu, "0")) ||
+                       (!!gpu[1] != !strcmp(expect_gpu, "1")))) {
+        printf("[test_wb_batch] FAIL: GPU packing dispatch did not match KZ3_EXPECT_WB_GPU=%s\n", expect_gpu);
+        g_fail++;
+    }
     printf("[test_wb_batch] %d checks match, %d mismatch\n", g_pass, g_fail);
     printf("[test_wb_batch] %s\n", g_fail ? "FAIL" : "PASS");
     cellGcmTerminate();

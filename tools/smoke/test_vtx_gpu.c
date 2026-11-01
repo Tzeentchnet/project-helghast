@@ -9,7 +9,7 @@
  * 2. Random draws (interleaved and separate buffers, odd strides and offsets, disabled attributes, base_index,
  *    one INLINE_ARRAY plan) through rsx_vertex_fetch_plan_prepare -> rsx_vg_plan -> rsx_vg_write_block -> vg_fetch
  *    per vertex, against rsx_vertex_fetch_many's float4 slots, bit for bit; every load stays inside the block.
- * 3. The fallbacks: a divided attribute (DIVIDED), an unmapped span (UNMAPPED), no inputs, the block cap (BIG).
+ * 3. Divider and modulo modes, inline bounds/defaults, and the CPU fallbacks.
  */
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
@@ -123,25 +123,30 @@ static void set_attr(rsx_vertex_fetch_plan* p, u32 attr, u32 type, u32 size, u32
 #define MAXV 4096u
 static rsx_vertex_ref g_refs[MAXV];
 static u8 g_cpu[MAXV * 256u];
+static u8 g_fallback[MAXV * 256u];
+static u32 g_fallback_bad;
 static rsx_vg_draw g_d;
 
 /* Returns the rsx_vg_plan reason; on OK compares every vertex. */
 static int run_draw(rsx_vertex_fetch_plan* p, u32 count, u32 max_block, unsigned long long* comps, unsigned long long* bad)
 {
     rsx_vertex_fetch_plan_prepare(p, g_refs, count);
-    const int why = rsx_vg_plan(p, max_block, &g_d);
+    const int why = rsx_vg_plan(p, g_refs, count, max_block, &g_d);
     if (why != RSX_VG_OK) return why;
-    if (!rsx_vertex_fetch_many(p, g_refs, count, g_cpu, p->layout.stride)) { printf("  cpu fetch failed\n"); (*bad)++; return why; }
-    if (g_d.block_bytes > sizeof g_block) { (*bad)++; return why; }
+    if (!rsx_vertex_fetch_many(p, g_refs, count, g_cpu)) { printf("  cpu fetch failed\n"); (*bad)++; return why; }
+    for (int batch = 0; batch <= 1; batch++)
+        if (!rsx_vg_cpu_fetch(p, g_refs, count, g_fallback, batch) ||
+            memcmp(g_fallback, g_cpu, (size_t)count * p->layout.stride)) g_fallback_bad++;
+    if ((u64)g_d.block_bytes + 64u > sizeof g_block) { (*bad)++; return why; }
     memset(g_block, 0xEE, g_d.block_bytes + 64);
     rsx_vg_write_block(&g_d, g_block);
     g_block_len = g_d.block_bytes;
     for (u32 i = 0; i < count; i++) {
-        const u32 e = rsx_vg_element(&g_refs[i]);
         for (u32 s = 0; s < p->layout.count; s++) {
             const u32 a = p->layout.attrs[s];
             u32 row[4]; float df[4];
             memcpy(row, g_block + a * 32u, 16); memcpy(df, g_block + a * 32u + 16u, 16);
+            const u32 e = vg_element(g_refs[i].vertex_id, g_refs[i].base_index, row[2]);
             for (u32 c = 0; c < 4; c++) {
                 const float got = vg_fetch(row[0], row[1], row[2], row[3], df[c], e, c);
                 (*comps)++;
@@ -166,6 +171,7 @@ static void part2(void)
         memset(&p, 0, sizeof p);
         rsx_vertex_layout_plan_init(&p.layout, mask);
         p.guest_ptr = guest_ptr;
+        p.divider_mask = rnd() & 0xFFFFu;
         const u32 interleaved = rnd() & 1u;
         const u32 vstride = 4u + rnd() % 60u;   /* odd and unaligned strides included */
         const u32 vbase = rnd() % 4096u;
@@ -174,14 +180,15 @@ static void part2(void)
             if (rnd() % 6u == 0) { set_attr(&p, a, 0, 0, 0, 0, 0); continue; }   /* disabled: default */
             const u32 t = types[rnd() % 7u], sz = 1u + rnd() % 4u;
             const u32 es = rsx_vertex_attrib_size(t, sz);
-            if (interleaved) set_attr(&p, a, t, sz, vstride > es ? vstride : es, vbase + rnd() % 16u, rnd() & 1u);
-            else set_attr(&p, a, t, sz, es + rnd() % 9u, rnd() % 65536u, rnd() & 1u);
+            const u32 frequency = rnd() % 6u == 0u ? 65535u : rnd() % 5u;
+            if (interleaved) set_attr(&p, a, t, sz, vstride > es ? vstride : es, vbase + rnd() % 16u, frequency);
+            else set_attr(&p, a, t, sz, es + rnd() % 9u, rnd() % 65536u, frequency);
             nenabled++;
         }
         const u32 count = 1u + rnd() % (iter % 10u == 0 ? MAXV : 300u);
         const u32 bi = rnd() % 64u, maxid = 1u + rnd() % 2000u;
         for (u32 i = 0; i < count; i++) { g_refs[i].vertex_id = rnd() % maxid; g_refs[i].base_index = bi; }
-        if (iter % 50u == 49u) {   /* INLINE_ARRAY: one packed stream, element = vertex_id + base_index */
+        if (iter % 50u == 49u) {   /* INLINE_ARRAY: one packed stream */
             rsx_vertex_fetch_plan_set_inline(&p, NULL, NULL, 0);
             u32 off = 0;
             for (u32 a = 0; a < 16u; a++) { p.inline_off[a] = off; off += p.attr[a].elem_size; }
@@ -197,6 +204,7 @@ static void part2(void)
     printf("  %u draws on the GPU path (%u inline), %u spans, %u attribute spans merged into others\n", ok, inl, spans, merged);
     CHECK(bad == 0 && ok > 2500u, "part 2: %llu components of %u random draws vs rsx_vertex_fetch_many: %llu mismatches", comps, ok, bad);
     CHECK(g_oob == oob0, "part 2: every shader load inside the draw's block (%llu outside)", (unsigned long long)(g_oob - oob0));
+    CHECK(g_fallback_bad == 0, "part 2: batched and scalar CPU fallbacks match on randomized draws");
 }
 
 static void part3(void)
@@ -206,7 +214,12 @@ static void part3(void)
     for (u32 i = 0; i < 16; i++) { g_refs[i].vertex_id = i; g_refs[i].base_index = 0; }
     memset(&p, 0, sizeof p); rsx_vertex_layout_plan_init(&p.layout, 0x3u); p.guest_ptr = guest_ptr;
     set_attr(&p, 0, RSX_VTX_TYPE_FLOAT, 3, 12, 0, 0); set_attr(&p, 1, RSX_VTX_TYPE_HALF, 2, 4, 4096, 2);
-    CHECK(run_draw(&p, 16, 64u << 20, &comps, &bad) == RSX_VG_DIVIDED, "part 3: frequency-divided attribute stays on the CPU");
+    CHECK(run_draw(&p, 16, 64u << 20, &comps, &bad) == RSX_VG_OK && bad == 0, "part 3: frequency division on the GPU");
+    p.divider_mask = 2u;
+    CHECK(run_draw(&p, 16, 64u << 20, &comps, &bad) == RSX_VG_OK && bad == 0, "part 3: frequency modulo on the GPU");
+    set_attr(&p, 1, RSX_VTX_TYPE_HALF, 2, 4, 4096, 65536u);
+    CHECK(run_draw(&p, 16, 64u << 20, &comps, &bad) == RSX_VG_DIVIDED, "part 3: unencodable frequency stays on the CPU");
+    p.divider_mask = 0;
     set_attr(&p, 1, RSX_VTX_TYPE_HALF, 2, 4, SRC_BYTES - 8u, 0);
     CHECK(run_draw(&p, 16, 64u << 20, &comps, &bad) == RSX_VG_UNMAPPED, "part 3: unmapped span stays on the CPU");
     set_attr(&p, 1, RSX_VTX_TYPE_HALF, 2, 4, 4096, 0);
@@ -229,15 +242,67 @@ static void part3(void)
         CHECK(same && g_oob == oob0, "part 3: out-of-span elements clamp to the last element");
     }
     {
+        const u32 block = g_d.block_bytes;
+        const u32 ring = 256u + 16u * (u32)sizeof(rsx_vertex_ref) + block;
+        const u32 exact = rsx_vg_ring_block_limit(64u << 20, 16u, ring);
+        const u32 short_by_one = rsx_vg_ring_block_limit(64u << 20, 16u, ring - 1u);
+        CHECK(exact == block && short_by_one == block - 1u &&
+              rsx_vg_ring_block_limit(64u << 20, UINT32_MAX, ring) == 0u,
+              "part 3: GPU block limit reserves the ring payload and alignment");
+        CHECK(run_draw(&p, 16, short_by_one, &comps, &bad) == RSX_VG_BIG &&
+              rsx_vg_cpu_fetch(&p, g_refs, 16, g_fallback, 1) &&
+              !memcmp(g_fallback, g_cpu, (size_t)16u * p.layout.stride),
+              "part 3: GPU block one byte over ring capacity falls back to CPU fetch");
+    }
+    {
         int same = 1;
+        static const u32 frequencies[] = {0, 1, 2, 3, 7, 255, 65535};
         for (u32 i = 0; i < (1u << 20); i++) {
             rsx_vertex_ref r = { rnd() ^ (rnd() << 21), rnd() ^ (rnd() << 21) };
-            same &= rsx_vg_element(&r) == rsx_vertex_element_index(r.vertex_id, r.base_index, i & 1u, (i >> 1) & 1u);
+            const u32 frequency = frequencies[i % (sizeof frequencies / sizeof frequencies[0])];
+            const u32 modulo = (i >> 3) & 1u;
+            const u32 fmt = (frequency << 8) | (modulo << 24);
+            same &= vg_element(r.vertex_id, r.base_index, fmt) ==
+                    rsx_vertex_element_index(r.vertex_id, r.base_index, frequency, modulo);
         }
-        CHECK(same, "part 3: rsx_vg_element == rsx_vertex_element_index (frequency 0/1) on 2^20 random refs");
+        CHECK(same, "part 3: GPU element == CPU element across divider modes on 2^20 random refs");
     }
+    memset(&p, 0, sizeof p); rsx_vertex_layout_plan_init(&p.layout, 0x3u);
+    set_attr(&p, 0, RSX_VTX_TYPE_FLOAT, 1, 4, 0, 1);
+    set_attr(&p, 1, RSX_VTX_TYPE_FLOAT, 1, 4, 0, 0);
+    p.divider_mask = 1u;
+    p.inline_data = g_src; p.inline_bytes = 16u; p.inline_stride = 8u;
+    p.inline_off[0] = 0; p.inline_off[1] = 4;
+    g_refs[2].vertex_id = 0xFFFFFFFFu;
+    CHECK(run_draw(&p, 16, 64u << 20, &comps, &bad) == RSX_VG_OK && bad == 0,
+          "part 3: inline frequency-one modulo and out-of-range non-position defaults");
+    set_attr(&p, 0, RSX_VTX_TYPE_FLOAT, 1, 4, 0, 0);
+    CHECK(run_draw(&p, 16, 64u << 20, &comps, &bad) == RSX_VG_UNMAPPED &&
+          !rsx_vertex_fetch_many(&p, g_refs, 16, g_cpu) &&
+          !rsx_vg_cpu_fetch(&p, g_refs, 16, g_fallback, 1) &&
+          !rsx_vg_cpu_fetch(&p, g_refs, 16, g_fallback, 0),
+          "part 3: invalid inline position falls back to the CPU draw-drop rule");
     memset(&p, 0, sizeof p); rsx_vertex_layout_plan_init(&p.layout, 0u);
     CHECK(run_draw(&p, 16, 64u << 20, &comps, &bad) == RSX_VG_NO_INPUTS, "part 3: no inputs stays on the CPU");
+}
+
+static void part4(void)
+{
+    CHECK(rsx_vg_route(0, 0, 0) == RSX_VG_ROUTE_CPU &&
+          rsx_vg_route(1, 0, 0) == RSX_VG_ROUTE_GPU,
+          "part 4: uncached draws select the requested fetch path");
+    CHECK(rsx_vg_route(1, 1, 0) == RSX_VG_ROUTE_CACHE &&
+          rsx_vg_route(0, 1, 0) == RSX_VG_ROUTE_CACHE,
+          "part 4: valid cache hits take precedence");
+    CHECK(rsx_vg_route(1, 0, 1) == RSX_VG_ROUTE_FILL &&
+          rsx_vg_route(0, 0, 1) == RSX_VG_ROUTE_FILL,
+          "part 4: fills and verification use CPU-decoded payloads");
+    CHECK(rsx_vg_cache_wait(100u, 160u) && rsx_vg_cache_wait(159u, 160u) &&
+          !rsx_vg_cache_wait(160u, 160u) && !rsx_vg_cache_wait(161u, 160u),
+          "part 4: failed cache fills retry after 60 frames");
+    CHECK(rsx_vg_cache_wait(0xFFFFFFF0u, 0x2Cu) &&
+          rsx_vg_cache_wait(0x2Bu, 0x2Cu) && !rsx_vg_cache_wait(0x2Cu, 0x2Cu),
+          "part 4: cache retry survives frame-counter wraparound");
 }
 
 int main(void)
@@ -253,6 +318,7 @@ int main(void)
     part1();
     part2();
     part3();
+    part4();
     if (getenv("VG_PRINT_HLSL")) puts(RSX_VG_HLSL);
     printf(g_fail ? "[FAIL] test_vtx_gpu\n" : "[PASS] test_vtx_gpu\n");
     return g_fail;

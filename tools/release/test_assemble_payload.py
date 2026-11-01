@@ -53,7 +53,7 @@ def fake_repo(root):
                 "tools/release/assemble_payload.py", "tools/jobmods.py", "tools/elf_info.py", "tools/psarc.py",
                 "tools/spu/lift_spu.py", "tools/spu/gen_spu_register.py", "tools/spu/kz3ver.py",
                 "tools/spu/test_spu_lift.py", "re/data/spu_map_114.tsv", "re/data/spu_seeds_114.tsv",
-                "re/data/spu_coverage_seeds.tsv", "re/data/overrides/ppu_overrides-114.txt", "re/data/overrides/ppu_lift_fixups-114.txt", "re/data/other_114.tsv", "re/data/campaign_levels.tsv", "port/kz3/CMakeLists.txt", "port/kz3/main.cpp",
+                "re/data/spu_coverage_seeds.tsv", "re/spu/native_gates.tsv", "re/data/overrides/ppu_overrides-114.txt", "re/data/overrides/ppu_lift_fixups-114.txt", "re/data/other_114.tsv", "re/data/campaign_levels.tsv", "port/kz3/CMakeLists.txt", "port/kz3/main.cpp",
                 "port/spu/ppu_overrides.txt", "port/text/port_ui.tsv", "port/vfs/kz3_overlay.c", "port/vfs/test_vfs_overlay.c",
                 "port/net/kz3_net.c", "port/net/test_kz3_net.c",
                 "port/kz3/__pycache__/x.pyc", "cmake/mingw-w64.cmake", "cmake/notes.txt",
@@ -151,7 +151,7 @@ def main():
                 "kz3-setup/assets/profile_edit.py",
                 "kz3-setup/elf_info.py", "kz3-setup/spu/lift_spu.py", "kz3-setup/spu/gen_spu_register.py",
                 "kz3-setup/spu/kz3ver.py", "re/data/spu_map_114.tsv", "re/data/spu_seeds_114.tsv",
-                "re/data/spu_coverage_seeds.tsv", "re/data/overrides/ppu_overrides-114.txt", "re/data/overrides/ppu_lift_fixups-114.txt", "re/data/campaign_levels.tsv", "port/kz3/CMakeLists.txt",
+                "re/data/spu_coverage_seeds.tsv", "re/spu/native_gates.tsv", "re/data/overrides/ppu_overrides-114.txt", "re/data/overrides/ppu_lift_fixups-114.txt", "re/data/campaign_levels.tsv", "port/kz3/CMakeLists.txt",
                 "port/kz3/main.cpp", "port/spu/ppu_overrides.txt", "lang/port_ui.tsv", "port/vfs/kz3_overlay.c", "port/net/kz3_net.c",
                 "cmake/mingw-w64.cmake",
                 "ps3recomp/LICENSE", "ps3recomp/CMakeLists.txt", "ps3recomp/.kz3-patchset",
@@ -169,6 +169,10 @@ def main():
         pe = Path(out) / "kz3-setup" / "assets" / "profile_edit.py"
         check((pe.parents[2] / "re" / "data" / "campaign_levels.tsv").is_file(),
               "campaign_levels.tsv sits where profile_edit.py's LEVELS_TSV resolves in the payload", str(pe))
+        lift = Path(out) / "kz3-setup" / "spu" / "lift_spu.py"
+        gate_table = lift.parents[2] / "re" / "spu" / "native_gates.tsv"
+        check(gate_table.is_file() and gate_table.read_bytes() == (Path(repo) / "re" / "spu" / "native_gates.tsv").read_bytes(),
+              "native gate table sits where the packaged SPU lift reads it", str(gate_table))
 
         with open(os.path.join(out, "manifest.json"), encoding="utf-8") as f:
             man = json.load(f)
@@ -196,6 +200,15 @@ def main():
         rc, txt = run(["--repo", repo, "--dry-run"])
         check(rc == 0 and "kz3-setup/release/firstrun.py" in txt and "fw_spu" not in txt
               and not os.path.exists(os.path.join(tmp, "repo", "payload")), "--dry-run lists and writes nothing", txt)
+
+        gate_source = Path(repo) / "re" / "spu" / "native_gates.tsv"
+        gate_data = gate_source.read_bytes()
+        gate_source.unlink()
+        missing_out = os.path.join(tmp, "missing-native-gates")
+        rc, txt = run(["--repo", repo, "--out", missing_out, "--version", "1.0"])
+        check(rc == 1 and "MISSING re/spu/native_gates.tsv" in txt and not os.path.exists(missing_out),
+              "a missing native gate table is refused", txt)
+        gate_source.write_bytes(gate_data)
 
         # a symlink inside a copied tree is skipped, never followed
         target = put(tmp, "outside/secret_data.c", "outside\n")

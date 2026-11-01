@@ -174,6 +174,19 @@ def main():
         rc, out = run(tmp, steps5, "--build", b5, "--update", os.path.join(tmp, "upd"))
         check(rc == 0 and open(cnt).read() == "123", f"6 new inputs re-run all: {open(cnt).read()!r}")
 
+        gate_table = os.path.join(tmp, "root", "re", "spu", "native_gates.tsv")
+        gate_ctx = fr.Ctx(root=os.path.join(tmp, "root"), build=os.path.join(tmp, "b-gates"))
+        missing_hash = fr.lift_inputs_hash(gate_ctx)
+        os.makedirs(os.path.dirname(gate_table), exist_ok=True)
+        with open(gate_table, "w", encoding="utf-8") as f:
+            f.write("first\n")
+        added_hash = fr.lift_inputs_hash(gate_ctx)
+        with open(gate_table, "w", encoding="utf-8") as f:
+            f.write("second\n")
+        changed_hash = fr.lift_inputs_hash(gate_ctx)
+        check(len({missing_hash, added_hash, changed_hash}) == 3,
+              "6 native gate table creation and edits invalidate the SPU lift")
+
         # 7. log location, rotation by start time, fallback
         dl = os.path.join(tmp, "dl")
         log = os.path.join(dl, fr.DEFAULT_LOG_NAME)

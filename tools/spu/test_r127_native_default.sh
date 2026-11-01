@@ -15,7 +15,7 @@ $CC -std=gnu17 -O1 -w -msse4.1 -ffp-contract=off -I "$T/runtime/spu" -I "$T/incl
 fail=0
 chk() {  # name expected-lines... ; env passed via $ENVS
   local name=$1 want=$2
-  local got; got=$(env -u KZ3_NATIVE_JOB_LIGHTPROBES -u KZ3_NATIVE_JOB_LP_KD -u KZ3_NATIVE_JOB_LP_LIGHT -u KZ3_NATIVE_JOB_POST $ENVS "$OUT/p" 2>/dev/null | tr '\n' ' ')
+  local got; got=$(env -u KZ3_NATIVE_JOB_LIGHTPROBES -u KZ3_NATIVE_JOB_LP_KD -u KZ3_NATIVE_JOB_LP_LIGHT -u KZ3_NATIVE_JOB_POST $ENVS "$OUT/p" 2>/dev/null | tr -d '\r' | tr '\n' ' ')
   [[ "$got" == "$want" ]] && echo "PASS $name" || { echo "FAIL $name: got '$got' want '$want'"; fail=1; }
 }
 ON114="slot 8 native slot 9 native slot 10 lifted slot 11 lifted slot 12 native slot 13 native slot 14 lifted slot 15 lifted slot 16 native slot 17 lifted other native 0 "

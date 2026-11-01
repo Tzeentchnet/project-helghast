@@ -6,9 +6,9 @@
  * as the SPU's `bi $r0` would. Returning 0 runs the lifted body (unexpected arguments, a debug LS gate armed, the
  * module's constant pool not what the native code was written for).
  *
- * Default off: a gate is filled only when one of its entry's flags is 1 (`env` lists KZ3_NATIVE_JOB_<NAME>
- * alternatives separated by '|'); KZ3_NATIVE_JOB_POST=1 fills every gate of the Gfx.Post jobs. The gate array is
- * defined once, in kz3_native_jobs.c. KZ3_NATIVE_REC=DIR records real gate inputs instead (see kz3_native_jobs.c);
+ * The 1.14 light-probe gates are on by default; other gates default off. The switches listed in each entry's `env`
+ * override its default; KZ3_NATIVE_JOB_POST=1 fills every gate of the Gfx.Post jobs. The gate array is defined once
+ * in kz3_native_jobs.c. KZ3_NATIVE_REC=DIR records real gate inputs instead (see kz3_native_jobs.c);
  * tools/spu/native_diff.py replays records and synthetic inputs through lifted and native code and compares.
  */
 #ifndef KZ3_NATIVE_JOBS_H

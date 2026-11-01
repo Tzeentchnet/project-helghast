@@ -26,7 +26,7 @@ void (*g_kz3_wtrace)(const char*, int, uint32_t, uint64_t, uint64_t) = 0;
 void spu_ls_watch_slow(uint32_t a, int w, const uint8_t* p, uint32_t pc, uint32_t lr) { (void)a; (void)w; (void)p; (void)pc; (void)lr; }
 void spu_jmp_no_unwind(void* env) { (void)env; }
 void yz_lockstep_tick(spu_context* c) { (void)c; }
-void spu_check_stack_reset(spu_context* c, void (*f)(spu_context*)) { (void)c; (void)f; }
+void spu_check_stack_reset(spu_context* c, void (SPU_ABI *f)(spu_context*)) { (void)c; (void)f; }
 void kz3_jobcall_close(spu_context* c, uint32_t pc) { (void)c; (void)pc; }
 void kz3_jobcost_init_once(void) {}
 int kz3_wws_interp_on(void) { return 0; }

@@ -285,8 +285,8 @@ def native_gates(sub, name):
     import re
     tsv = os.path.join(ROOT, "re", "spu", "native_gates.tsv")
     rows = []
-    if os.path.exists(tsv):
-        for line in open(tsv):
+    with open(tsv, encoding="utf-8") as table:
+        for line in table:
             if line.startswith("#") or not line.strip():
                 continue
             f = line.rstrip("\n").split("\t")
@@ -295,7 +295,8 @@ def native_gates(sub, name):
     p = os.path.join(sub, "spu_recomp.c")
     if not rows or not os.path.exists(p):
         return 0
-    t = open(p).read()
+    with open(p) as source:
+        t = source.read()
     n = 0
     for addr, slot, job in rows:
         head = f"SPU_ABI void {name}_spu_func_{addr:08X}(spu_context* ctx) {{\n"
@@ -307,7 +308,8 @@ def native_gates(sub, name):
         n += 1
     decl = "extern int (*g_kz3_native_gate[])(spu_context*);   /* SPU pass 122: re/spu/native_gates.tsv */\n"
     t = re.sub(r'(#include "spu_helpers.h"\n)', lambda m: m.group(1) + decl, t, count=1)
-    open(p, "w").write(t)
+    with open(p, "w") as source:
+        source.write(t)
     return n
 
 

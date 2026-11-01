@@ -356,7 +356,7 @@ LIFT_INPUTS = [   # (base: "root" | "tools" | "toolkit", glob) : what the PPU an
     ("root", "port/spu/ppu_overrides.txt"), ("root", "port/spu/ppu_lift_fixups-*.txt"),
     ("root", "re/data/overrides/ppu_overrides-*.txt"), ("root", "re/data/overrides/ppu_lift_fixups-*.txt"),
     ("root", "re/data/spu_map_114.tsv"), ("root", "re/data/spu_seeds_114.tsv"),
-    ("root", "re/data/spu_coverage_seeds.tsv"),
+    ("root", "re/data/spu_coverage_seeds.tsv"), ("root", "re/spu/native_gates.tsv"),
     ("tools", "jobmods.py"), ("tools", "elf_info.py"), ("tools", "spu/lift_spu.py"),
     ("tools", "spu/gen_spu_register.py"), ("tools", "spu/kz3ver.py"), ("tools", "release/lift_fixups.py"),
     ("toolkit", "tools/*.py"), ("toolkit", ".kz3-patchset"),
