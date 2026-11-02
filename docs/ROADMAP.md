@@ -33,8 +33,9 @@ Where each feature of the PS3 game stands today, and the port-only features with
 - 📋 Motion blur strength setting (needs a clean way to switch the game's blur pass)
 - 🔧 Experimental XeSS Super Resolution path: deferred depth, camera motion, jitter, and responsive/HUD masks are
   implemented, and native gameplay dispatch is validated. Normal temporal jitter still causes a small constant
-  whole-scene jitter; a zero-jitter diagnostic is stable, so matching the game projection shift to XeSS is the current
-  blocker before broader image-quality and hardware testing, object motion, and UI separation
+  whole-scene jitter; a zero-jitter diagnostic is stable but does not isolate the cause. History use, motion and
+  camera pairing, jitter phase/sign, and draw coverage are the current blocker before broader image-quality and
+  hardware testing, object motion, and UI separation
 - 📋 Broader temporal anti-aliasing and upscaling work (TAA, DLAA, DLSS, FSR) after the experimental XeSS path and
   Windows renderer are validated
 - 📋 Ray-traced sun shadows, then ambient occlusion and reflections (off by default)

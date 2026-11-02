@@ -5,8 +5,11 @@ renderer code around it, the release tooling and Intel's SDK 3.0.2 headers and d
 and a black-box probe on an RTX 5070 (driver 617.42). The game was not run, so in-game behaviour here comes from
 reading the code. No code was changed by the review itself.
 
-**Status:** the fixes have since been made and are waiting for a game run. See [Fix record](#fix-record) at the end, which
-also has the test plan. The findings below are kept as written, so their line references are to commit `2c4fa7a`.
+**Status (updated 2026-10-31):** the fixes were made and the game was run once with them. That run found and fixed a
+camera-pairing bug, but a constant small whole-scene jitter remains, so the branch is not ready as an image-quality
+fix. See [Fix record](#fix-record) for what was done and [Follow-up](#follow-up-whole-scene-jitter-further-issues-and-future-work)
+for the jitter analysis, further issues and future work. The findings below are kept as written, so their line
+references are to commit `2c4fa7a`.
 
 ## Verdict
 
@@ -460,7 +463,7 @@ After correcting that path, rerun gameplay at 1920x1080 with `KZ3_DISPLAY_FILTER
 
 1. `[xess] camera basis: cross(right, forward).up = +1.000`. **If this says -1, stop:** the pose axes are not what the
    reprojection assumes and motion will be wrong everywhere.
-2. `[xess] frame N: XeSS-SR 2.0.2 ...` should say `responsive=generated, hud=masked, mip bias -0.585`.
+2. `[xess] frame N: XeSS-SR 2.0.2 ...` should say `responsive=generated, hud=masked, mip bias -0.586`.
 3. `[xess] camera pairing: renderer frame ...` lines. While playing, `used` should rise by one a frame, usually one
    behind `latest` if the PPU runs ahead. `misses`, `repeats` and `jumps` should stay near zero. `repeats` rising during
    pause is expected.
@@ -482,3 +485,173 @@ Then look at the picture:
 | Rename `libxess.dll` | One log line naming the real cause, picture stays Bilinear, no shimmer | Keep the log |
 
 If Graphics Tools can be installed, one run with the D3D12 debug layer would check the new barriers.
+
+## Follow-up: whole-scene jitter, further issues and future work
+
+Written 2026-10-31 on `xesstest` at `37a1e3d`, after the first game run. This pass read [docs/XESS.md](docs/XESS.md),
+this record, [features.tsv](docs/features.tsv) with the generated [FEATURES.md](docs/FEATURES.md),
+[ROADMAP.md](docs/ROADMAP.md), the adapter, and the renderer in the local `work/ps3recomp-patched` tree (it holds the
+2143 symbols; it was not diffed against the full series). It also read Intel's SDK 3.0.2 guide and headers. **Nothing
+was built or run, there was no game run and no GPU test.** The only command run was `python tools/features.py --check`,
+which passes. Everything below is therefore **Read** or **Inferred**, and the causes are ranked hypotheses, not
+findings. Renderer references name the function, because the patched toolkit is generated and not in git.
+
+### What is known about the jitter
+
+| Observation | Source |
+|---|---|
+| Normal jitter gives a constant small whole-scene jitter | Game run, pre-GPU-merge build |
+| `KZ3_XESS_HUD_MASK=0` does not change it | Game run |
+| Forcing the projection jitter and the jitter given to XeSS to zero removes it; XeSS keeps dispatching with depth, motion and the scene mask | Game run, temporary build |
+| 600 dispatches, 4 resets, 3 repeats, 2 jumps, 2 misses after the pairing fix | Game run |
+| Jitter cycle at 1080p is 18 phases (`ceil(8 x 1.5^2)`), so roughly one cycle a second at 16-22 frames/s | Read ([xess.cpp:1254](port/kz3/xess.cpp#L1254)) |
+
+The cycle length matters: any error that scales with the jitter shows up as a slow, regular wobble, which is easy to
+see and matches the report.
+
+### What the zero-jitter diagnostic does not show
+
+The diagnostic changed two inputs at once, and it also changed what XeSS has to do. With no jitter every frame samples
+the same points, so there is nothing to accumulate. A history that XeSS rejects or reprojects wrongly looks perfectly
+stable in that mode, because the current frame is already the answer. The result therefore cannot tell "the jitter is
+applied or reported wrongly" from "XeSS cannot use its history". The same goes for wrong motion vectors, which are also
+invisible without jitter.
+
+[ROADMAP.md:36](docs/ROADMAP.md#L36) says "matching the game projection shift to XeSS is the current blocker". That
+states a cause the evidence does not isolate. [XESS.md](docs/XESS.md) known issue 1 and future work 1 name the projection
+displacement, the execute value and draw coverage, which is closer, but still leave out the history and phase-lag
+causes below.
+
+### What reading the code says is right
+
+- **Offset formula.** Intel's guide (SDK 3.0.2, `xess_sr_developer_guide_english.md` lines 273-276) adds `Jx*2/W` and subtracts `Jy*2/H` in the projection. The renderer adds `2*jx/Wv` to `xf[4]` and subtracts
+  `2*jy/Hv` from `xf[5]` in `sink_end_impl`. Because `xf[4..5]` is the viewport offset applied after the divide
+  (`_p.w * vp_posoffset` in the shared vertex epilogue), the shift is the same in NDC. It is a viewport translate, so it
+  also reaches geometry the game transformed on the SPUs, which a projection edit would not.
+- **Consistency.** The motion shader removes the same jitter (`ndc - 2*jx/w`), and the execute call and the draw read the
+  same per-frame value. A per-frame mismatch between the two is not visible in the code.
+- **Nothing unexpected on the fixed inputs:** `JITTERED_MV` is not set, which is right because motion excludes jitter;
+  the sequence stays inside [-0.5, 0.5]; there is no jitter scale or velocity scale call.
+
+What the reading cannot see is the part that matters: whether the pixels on screen actually move by the amount reported.
+
+### What the existing measurements cover
+
+[test_xess_temporal.cpp](tools/smoke/test_xess_temporal.cpp) feeds XeSS a synthetic checker with flat depth `0.5` and
+motion values it writes itself. It checks XeSS's conventions in isolation. It does not run the renderer's jitter, the
+adapter's depth-to-motion shader, the camera hooks or any game image. The review's "jitter sign and scale" and "motion
+vectors" rows in *What holds up* are therefore about XeSS's expectations, not about this game. Also, the sign test
+negated both axes together, so a single inverted axis is not excluded.
+
+### Candidate causes, most likely first
+
+| # | Hypothesis | Why plausible | What would settle it |
+|---|---|---|---|
+| C1 | XeSS cannot use its history, so each output is one jittered frame, which moves with the phase | Matches the symptom and hides in the diagnostic. Motion has only ever been checked on synthetic data. Possible reasons: wrong or mis-paired motion; wrong near and far (they come from unrecovered `vf17` offsets, see F5); the hooked pose differing from the pose the game rendered with, for example through sway or recoil applied later; a large responsive mask (any pixel that differs by 0.2 or more between the opaque and final captures is marked) weighting the current frame; depth that no longer matches a colour that has been through DOF and motion blur | Pause test and the motion-scale test below |
+| C2 | Parts of the picture are not shifted while XeSS assumes they are | Only draws into `0x01300000` that are depth-tested against the primary depth, plus the primary pass, are jittered. Skipped: depth-test-off draws into the scene (sky, full-screen and additive effects), draws whose viewport is not exactly full (the check compares floats with `==`), any other target (half-resolution particles, AO, bloom) composited later, HUD, grain and vignette. Where those cover much of the frame, XeSS moves them by minus the jitter. Outdoor scenes with a large sky are the likely worst case | Per-class draw counters; two-phase input comparison |
+| C3 | The image XeSS receives was made with a different phase than the one it is told | The jitter is the current renderer frame's, but the colour is the final display surface after the SPU post chain and compose. If any of that chain is a frame late, every dispatch is a phase off. The capture pairing is matched by renderer frame number, not by what the compose sampled | A one-phase lag switch on the dispatch value |
+| C4 | One axis, or the whole sign, is inverted in game | Y passes two sign flips (`xf[1]` and `xf[5]`) plus the RSX to D3D viewport convention. A wrong sign makes XeSS "correct" by twice the shift, which looks like jitter. Intel's own debug tip is to try `+1` and `-1` jitter scales | Per-axis scale sweep; measured pixel displacement |
+| C5 | Mip bias adds shimmer when accumulation fails | -0.586 on every scene texture sharpens and aliases the input. It amplifies C1 to C4 rather than causing them | `KZ3_XESS_MIP_BIAS=0` |
+| C6 | The post-merge build behaves differently | The gameplay evidence predates patches 2139-2141. The shared draw tail and the vertex offload were changed after it. All three vertex epilogues read in the toolkit use `vp_posoffset` alike, but the offload path was not read | Rebuild and rerun the HUD, mask and jitter checks |
+
+Unlikely, and why: FXAA (skipped on jittered frames, see F1), the HUD mask (tested), resets (4 in 600), a wrong
+jitter scale (it matches Intel's formula), and exposure (not related to position).
+
+### Experiments that would separate them
+
+Only experiments 1 and 2 need no new code. The rest are **proposed switches that do not exist yet** (the zero-jitter
+build was a temporary diagnostic). Each should log its setting once. Anything
+XeSS dumps must stay under `work/`, as `AGENTS.md` keeps game material out of the repository.
+
+| # | Experiment | Correct implementation gives | Implicates if not |
+|---|---|---|---|
+| 1 | **Pause test**: pause on a still scene. The camera state repeats, so motion is zero and the scene is static. This is Intel's static-scene tip | A steady, sharpening picture | If it still shakes, motion is cleared and the cause is C2 to C4 (or C1 for a non-motion reason, such as the mask) |
+| 2 | `KZ3_XESS_MIP_BIAS=0`, then `KZ3_XESS_CAMERA_LAG` as in the test plan | Calmer texture shimmer | C5 |
+| 3 | Projection jitter on, execute jitter zero, then the reverse | Both shake. A wobble that goes with only one of them points at that side | Which side is wrong |
+| 4 | **Two-phase jitter**: alternate `(+0.25, 0)` and `(-0.25, 0)` on the draw and the execute call, camera paused | Input frames differ by half an input pixel, output frames agree | Any remaining shake has a two-frame period, so it is easy to see and measure; its size gives the error in input pixels |
+| 5 | Execute-only jitter scale `+1/-1` per axis, using `xessSetJitterScale` | The existing signs give the steadiest result | C4, and which axis |
+| 6 | Velocity scale `0` with `xessSetVelocityScale`, then `+1/-1` | Paused scene: no change, because motion is already zero. Moving scene: zero scale is the worst case for ghosting but removes motion errors | C1 motion, if the jitter changes with the scale in a moving scene |
+| 7 | Dispatch jitter lagged by one frame, `KZ3_XESS_JITTER_LAG=1` | Worse | C3 if it improves things |
+| 8 | Responsive mask forced to zero, as `KZ3_XESS_HUD_MASK=0` does for the HUD part | Little change | C1 (mask) if it improves things |
+| 9 | Coverage counters per frame: draws into the scene target and the deferred set, split into jittered, depth test off, other depth slot, viewport not full, other target | Nearly all draws jittered | C2, and which class |
+| 10 | Capture the pre-XeSS colour at two phases with the camera paused and cross-correlate | Whole-image shift equal to the phase difference, same sign on both axes | C2 (where it is not), C4 (sign) |
+| 11 | Intel's `xessStartDump` (in `xess_debug.h`) on a bad frame, replayed offline | A reproducible case for the runtime's own inputs | Any of the above |
+
+Measure rather than judge by eye: take the position shift between consecutive output frames in the paused scene by
+cross-correlation. The number it gives should be below a tenth of an output pixel when things are right, and it gives a
+figure to compare between builds.
+
+### Additional issues found in this pass
+
+| ID | Issue | Note |
+|---|---|---|
+| N1 | The zero-jitter diagnostic cannot isolate a cause | See above. Treat the current attribution in ROADMAP and XESS.md as a hypothesis |
+| N2 | The adapter's motion pass is checked for content and by host-test maths, never through XeSS with game data | The temporal test supplies its own motion and flat depth. Nothing proves that the depth-to-motion shader and the hooked pose agree with what the game rendered |
+| N3 | The camera pairing log shows numbers, not correctness | `used` and `latest` say how the ring was read, not whether the pose is the one the frame was drawn with. A slow steady pan with a measured residual would check it |
+| N4 | The jitter and coverage gates use float equality on the viewport | `vp.scale == W*0.5f` and the same for the other three terms. A viewport that differs in the last bit silently drops that draw from jitter. The draw is not counted anywhere |
+| N5 | No one-line summary of why a frame did or did not jitter | Each frame's jitter state, class counts and phase should be one log line at a low rate. Without it each hypothesis needs a new build |
+| N6 | The unrecovered `vf17` near and far offsets are the basis of the depth maths | Already marked `ASSUMPTION:`. A wrong far plane misplaces every pixel's depth. Check against a known object distance |
+| N7 | Post-merge HEAD was unbuilt and unrun | Resolved for compilation and startup after this review; gameplay evidence is still outstanding |
+| N8 | The test plan expects `mip bias -0.585`; the log prints `-0.586` | The fixed-point value is -150/256. Change the plan to `-0.586` |
+| N9 | `reset_history` is also set whenever the camera has no previous state | Not a bug, but a long run of such frames would hide in the "resets" count; log them separately from jump resets |
+| N10 | FEATURES.md shows "available" beside a visible defect | The table allows only `available` or `planned` for port rows, and the note carries the caveat, so this is accurate. A reader scanning the status column still sees no warning. Consider a first sentence in the note, "Experimental; visible jitter" |
+| N11 | The depth snapshot is taken at the scene copy; colour is taken after the post chain | They are different stages of the same frame. Post effects such as DOF and motion blur change the colour but not the depth, so XeSS's depth-based history checks work from a depth that no longer describes the colour |
+
+The documents are otherwise consistent with each other: the patch numbers, switch names, `KZ3_XESS_*` defaults, GPU-merge
+caveat and gameplay figures agree between `XESS.md`, the Fix record and `features.tsv`, and `tools/features.py --check`
+passes.
+
+### Future work
+
+Ordered by what unblocks what.
+
+1. **Find the cause of the jitter** with experiments 1, 3, 4, 5 and 9 above. They are small, and between them they decide
+   among C1 to C4. Do experiment 1 first, since it costs no code.
+2. **Add the debug switches and the one-line frame summary** (N5), then keep them. They are cheap, and every later
+   image-quality question will need them.
+3. **Fix what the experiments show.** Probable shapes: extend jitter to the missed draw classes (C2); move or lag the
+   jitter used for dispatch to the phase the image really carries (C3); correct an axis (C4); repair motion or pairing
+   (C1).
+4. **Rerun gameplay on the merged branch** before anything else is concluded (N7), including the log checks and
+   the picture table in *Gameplay result and remaining test plan*, and the pause test. The full native target now
+   builds and starts, but the post-merge picture has not yet been observed.
+5. **Replace camera-only motion** with per-object and skeletal motion (XESS.md future work 2). Until then, moving
+   characters ghost whatever else is fixed.
+6. **Move XeSS earlier**: capture before tone-mapping and the HUD (F6) and draw the HUD afterwards at output
+   resolution. This removes the HUD from the temporal solve and puts XeSS where Intel recommends. It is the largest
+   quality step after the jitter, and it needs the compose and post stages understood first.
+7. **Recover the real constants:** near and far, the 1.00 `scene_lr`, the surface offsets, and the cut thresholds, then
+   remove the matching `ASSUMPTION:` marks (F5, M11).
+8. **Exposure and reactivity:** replace the difference mask with something that carries meaning where the renderer
+   exposes it, and test the game's exposure instead of the fixed `1.0` (XESS.md future work 4 and 5).
+9. **Wider testing:** Intel and AMD GPUs, Proton (shader compiler limits noted for FXAA), the bundled clang build, the
+   D3D12 debug layer, and 1366x768 (see the open items under *Not verified*).
+10. **Product questions, once the picture is stable:** an in-game quality selector, showing the fallback state on the
+    Options row (the F4 item left open), the driver notice (M6), and whether 720p output should use XeSS at all (M7).
+11. **Process:** put the CI compile of `xess.cpp` behind the MinGW addition to `.#ci` that the Fix record describes, and
+    move a version of the temporal test into the host tests, with a mode that drives the adapter's own motion shader.
+
+### Documentation changes this implies
+
+Completed during the subsequent PR-preparation pass:
+
+| Document | Change |
+|---|---|
+| [ROADMAP.md:34-37](docs/ROADMAP.md#L34) | Say the cause is open, instead of naming the projection shift as the blocker |
+| [XESS.md](docs/XESS.md) Known issues 1 and Future work 1 | Add history use and phase lag to the list of things to measure, and point to this section |
+| [features.tsv:54](docs/features.tsv#L54) | Open the note with "Experimental; visible jitter", then run `python3 tools/features.py` and commit both |
+| The *Gameplay result and remaining test plan* above | Change `mip bias -0.585` to `-0.586` (N8) |
+
+### PR-preparation build follow-up
+
+The first full native build of the merged GPU/XeSS tip exposed a renderer compile failure. Patch
+[2142](port/patches/2142-xess-super-resolution.patch) had generalized the gamma input barrier, but its small barrier
+hunk matched the structurally identical FXAA block after the merge. FXAA therefore referred to undeclared
+`source`/`source_state` variables, while the gamma pass referred to the removed `sf` variable.
+
+[Patch 2144](port/patches/2144-xess-fxaa-gamma-barriers.patch) restores the FXAA surface transition and the gamma
+function's supplied source transition. `test_xess_compile` now checks the two barriers within their respective
+function bodies. The corrected 296-patch toolkit built the complete native game target with bundled Clang 23.1.3.
+The root `xess-jitter-run.cmd` then started that exact executable with the normal 1920x1080 Fit XeSS configuration;
+the process remained responsive and the startup log selected XeSS. It was stopped before gameplay, so this verifies
+the build and launch path only. The pause observation and all post-merge picture evidence remain outstanding.

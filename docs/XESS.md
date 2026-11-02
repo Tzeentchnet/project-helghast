@@ -95,6 +95,7 @@ Any missing, unsupported, or incoherent input
 | [`port/kz3/main.cpp`](../port/kz3/main.cpp) | Camera, FOV, and projection-plane publication |
 | [`port/patches/2142-xess-super-resolution.patch`](../port/patches/2142-xess-super-resolution.patch) | Renderer integration, input selection, presentation ordering, UI, and fallback |
 | [`port/patches/2143-xess-review-fixes.patch`](../port/patches/2143-xess-review-fixes.patch) | Fixes from [the review](../XESSReview.md): FXAA, mip bias, camera pairing, failure reporting, HUD mask, re-init safety |
+| [`port/patches/2144-xess-fxaa-gamma-barriers.patch`](../port/patches/2144-xess-fxaa-gamma-barriers.patch) | Restores the distinct FXAA and generalized gamma source barriers after the GPU/XeSS merge |
 | [`tools/release/stage_xess.py`](../tools/release/stage_xess.py) | Release-time validation and staging of Intel's unmodified runtime and required notices |
 | [`tools/smoke/test_xess.cpp`](../tools/smoke/test_xess.cpp) | Native D3D12 context, dispatch, mask and motion contents, readback, and fallback smoke test |
 | [`tools/smoke/test_xess_temporal.cpp`](../tools/smoke/test_xess_temporal.cpp) | Native check that XeSS reconstructs with the port's jitter and motion conventions |
@@ -319,14 +320,18 @@ Validation that needs no game data:
 - the native temporal test feeds a moving scene for 64 frames and checks that the port's jitter and motion conventions
   reconstruct, that the NDC path matches pixel-unit motion, and that flipped axes do not.
 
-The GPU-offload integration keeps patches 2139-2141 ahead of XeSS patches 2142-2143. On 2026-10-31, all 295 patches
-applied from the pinned ps3recomp commit, including the regenerated XeSS pair against that exact GPU-patched base. The
+The GPU-offload integration keeps patches 2139-2141 ahead of XeSS patches 2142-2144. On 2026-10-31, all 296 patches
+were present on the pinned ps3recomp commit, including the regenerated XeSS pair against that exact GPU-patched base
+and the follow-up barrier repair. The
 shared draw tail retains GPU-fetch submission accounting before query completion and performs XeSS scene captures
 after it; shutdown drains the list, releases GPU writeback resources, and then releases XeSS. The focused XeSS, vertex
 GPU, vertex-device, writeback GPU, native-gate, release, localization, and generated-feature tests passed. On an
 NVIDIA RTX 5070, both the shared D3D12 GPU-offload test and the XeSS dispatch, temporal, re-init, mask/motion readback,
-and runtime-fallback tests passed. The combined game executable has not yet been rebuilt or run; the gameplay evidence
-below predates the GPU merge.
+and runtime-fallback tests passed. Building the combined game exposed a misplaced barrier hunk: the FXAA pass referred
+to the generalized gamma source, while the generalized gamma pass referred to the removed surface variable. Patch
+2144 restores each pass's own resource and state, and `test_xess_compile` checks both function bodies. The full native
+game target then built with Clang 23.1.3. A direct XeSS startup check selected the 1920x1080 Fit path and remained
+responsive; it was stopped before gameplay, so the gameplay evidence below still predates the GPU merge.
 
 Native Windows gameplay validation on 2026-10-31 used the hardware D3D12 path on an NVIDIA RTX 5070, a 1280x720
 game image, a 1920x1080 Fit output, and `KZ3_DISPLAY_FILTER=xess`. Before review-fix patch 2143, the log showed:
@@ -349,16 +354,18 @@ uses the renderer frame counter, which advances on every KZ3 presentation. After
 The corrected path still has a constant small whole-scene visual jitter. Disabling only the HUD mask with
 `KZ3_XESS_HUD_MASK=0` did not change it. A temporary diagnostic build forced both the game projection jitter and the
 jitter supplied to XeSS to zero; XeSS continued dispatching with depth, motion, and the scene responsive mask, and the
-whole-scene jitter disappeared. Zero jitter is not the intended fix because it gives up temporal sample placement. The
-remaining blocker is therefore the real game projection displacement, the sign or scale supplied to XeSS, or draws
-that do not receive the same jitter. Broader image-quality, performance, hardware, level, and Proton validation waits
-on that correction. See the measured record in [the review](../XESSReview.md).
+whole-scene jitter disappeared. Zero jitter is not the intended fix because it gives up temporal sample placement, and
+the diagnostic does not distinguish incorrect jitter from history that XeSS cannot use. History use, motion and camera
+pairing, projection/execute phase and sign, and draw coverage all remain candidates. Broader image-quality,
+performance, hardware, level, and Proton validation waits on that correction. See the measured record and ranked
+hypotheses in [the review follow-up](../XESSReview.md#follow-up-whole-scene-jitter-further-issues-and-future-work).
 
 ## Known issues
 
 - Normal XeSS jitter currently produces a constant small whole-scene visual jitter in native gameplay. A temporary
-  zero-jitter diagnostic removes it, but that is not a final temporal-upscaling mode. The game projection displacement,
-  execute jitter convention, and coverage of jittered scene draws need to be measured together.
+  zero-jitter diagnostic removes it, but that mode needs no temporal accumulation and does not isolate the cause.
+  History use, motion and camera pairing, projection/execute phase and sign, masks, and coverage of jittered scene
+  draws need to be measured together. See the [review follow-up](../XESSReview.md#follow-up-whole-scene-jitter-further-issues-and-future-work).
 - Motion is camera-only. Moving characters, weapons, particles, vegetation, and shader animation can ghost or
   shimmer.
 - XeSS runs after tone-mapping, the SPU post chain (including motion blur) and the HUD, on display-referred color.
@@ -376,8 +383,9 @@ on that correction. See the measured record in [the review](../XESSReview.md).
 
 ## Future work
 
-1. Measure the actual screen-space displacement of the game projection jitter, compare it with the execute jitter
-   value, and identify any scene draws that miss the same shift.
+1. Use the pause, two-phase, per-axis scale, phase-lag, and draw-coverage experiments in the
+   [review follow-up](../XESSReview.md#experiments-that-would-separate-them) to determine whether history use, motion,
+   jitter phase/sign, or missed draws cause the whole-scene jitter.
 2. Publish coherent per-object and skeletal transforms and generate object motion vectors.
 3. Separate scene and UI composition so the HUD can be drawn after temporal upscaling.
 4. Replace the difference mask with semantic transparency/reactive information where the renderer exposes it.
