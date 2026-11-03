@@ -206,7 +206,7 @@ if(WIN32)
     target_compile_definitions(${PROJECT_NAME} PRIVATE KZ3_XESS)
     target_compile_definitions(ps3recomp_runtime PRIVATE KZ3_XESS)
     # Only the boundary headers reach the runtime, not all of port/kz3.
-    foreach(KZ3_XESS_HEADER xess.h xess_camera.h xess_inputs.h)
+    foreach(KZ3_XESS_HEADER xess.h xess_camera.h xess_inputs.h xess_diagnostics.h)
         configure_file(
             ${KZ3_XESS_HEADER}
             kz3_xess_include/${KZ3_XESS_HEADER}

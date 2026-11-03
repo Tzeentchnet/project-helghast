@@ -50,6 +50,54 @@ Switches for one run, each read once at the point named:
 | `KZ3_XESS_CAMERA_LAG` | `0` | Whole flips to step back from the paired camera; negative takes the latest published camera |
 | `KZ3_XESS_HUD_MASK` | on | `0` turns the HUD mask off |
 
+### Jitter diagnostics
+
+These one-run environment variables are experimental controls, not image-quality fixes. They are read once when XeSS
+is selected. Leaving them unset preserves the normal Halton sequence and the same projection and execute offsets;
+enabling only the trace also leaves rendering unchanged. Invalid values are reported in `[xess-diag]` and use the
+documented default.
+
+| Switch | Default | Effect |
+|---|---|---|
+| `KZ3_XESS_JITTER_PATTERN` | `halton` | `two-phase` alternates `(+0.25, 0)` and `(-0.25, 0)` input pixels by renderer-frame parity |
+| `KZ3_XESS_PROJECTION_SCALE_X`, `KZ3_XESS_PROJECTION_SCALE_Y` | `1`, `1` | Scale each axis applied to scene draws and removed during motion reconstruction |
+| `KZ3_XESS_EXECUTE_SCALE_X`, `KZ3_XESS_EXECUTE_SCALE_Y` | `1`, `1` | Independently scale each axis passed to XeSS execute |
+| `KZ3_XESS_EXECUTE_JITTER_LAG` | `0` | `1` uses the previous nominal sample for execute when it belongs to a contiguous successful dispatch |
+| `KZ3_XESS_JITTER_TRACE` | `0` | Log every Nth renderer frame; `1` logs every frame, `0` disables logging, maximum `60000` |
+
+Scale values must be finite numbers from `-2` to `2`; `0` disables an axis and `-1` reverses it. The lag applies the
+current execute scales to the previous nominal sample. It uses the current sample after a hold, skipped/failed frame,
+camera reset or discontinuity, or XeSS context recreation. When a diagnostic intentionally zeros projection jitter,
+the affected scene draws still receive their usual XeSS mip bias and FXAA remains skipped, so those unrelated changes
+do not confound the experiment. Fallback's jitter hold continues to depend on whether the projection was actually
+shifted.
+
+For example, set the following in PowerShell before starting `xess-jitter-run.cmd`, enter gameplay, and pause on a still
+scene. Compare this with an otherwise identical run with the pattern unset. Set `KZ3_XESS_JITTER_TRACE` to `1` when
+checking both phases; an even interval can sample only one phase.
+The launcher uses `build\kz3-win` by default; set `KZ3_XESS_BUILD_DIR` to use a different local build directory.
+
+```powershell
+$env:KZ3_XESS_JITTER_PATTERN = "two-phase"
+$env:KZ3_XESS_JITTER_TRACE = "1"
+.\xess-jitter-run.cmd
+```
+
+For projection-only or execute-only runs, respectively set both execute scales or both projection scales to `0`; for
+the zero-jitter control set all four to `0`. Clear the diagnostic variables between runs. Keep logs and captures that
+contain game material under `work/` and do not commit them.
+
+Each trace line identifies the renderer frame, dispatch result, whether a sample was active or held, nominal,
+projection and execute offsets in input pixels, and whether lag was applied. On fallback the execute values are the
+planned values, not a successful XeSS call. Counts describe draws **evaluated at the jitter-selection point**, before
+final submission; they are not counts of pixels or guaranteed GPU submissions. `deferred` is a local full-size target
+with at least four render targets, `scene` is the identified full-size scene target excluding those deferred draws,
+and `other` is everything else. For the deferred/scene candidates, `shifted`, `partial-viewport`, `depth-disabled`,
+`depth-mismatch`, `zero-projection`, and `unavailable` are exclusive outcomes in that order. `depth-mismatch` includes
+an absent depth slot or a scene draw whose slot/frame does not match the primary; `zero-projection` is an available
+sample with zero projection offset, while `unavailable` counts eligible draws whose jitter sample was held or could not
+be obtained. The logs do not establish which screen regions a draw covers.
+
 ## Architecture
 
 The Intel ABI and Killzone 3 hooks are kept outside the general ps3recomp runtime. The KZ3 target defines
@@ -94,10 +142,12 @@ Any missing, unsupported, or incoherent input
 | [`port/kz3/xess_motion.h`](../port/kz3/xess_motion.h) | Platform-independent depth reconstruction and camera reprojection |
 | [`port/kz3/xess_camera.h`](../port/kz3/xess_camera.h) | Platform-independent camera bridge, flip pairing, and freshness rules |
 | [`port/kz3/xess_inputs.h`](../port/kz3/xess_inputs.h) | Pure deferred-pass, scene-resolve, jitter, capture-pair, aspect, and mip-bias rules |
+| [`port/kz3/xess_diagnostics.h`](../port/kz3/xess_diagnostics.h) | Host-tested diagnostic parsing, phase/lag sampling, and draw accounting |
 | [`port/kz3/main.cpp`](../port/kz3/main.cpp) | Camera, FOV, and projection-plane publication |
 | [`port/patches/2150-xess-super-resolution.patch`](../port/patches/2150-xess-super-resolution.patch) | Renderer integration, input selection, presentation ordering, UI, and fallback |
 | [`port/patches/2151-xess-review-fixes.patch`](../port/patches/2151-xess-review-fixes.patch) | Fixes from [the review](../XESSReview.md): FXAA, mip bias, camera pairing, failure reporting, HUD mask, re-init safety |
 | [`port/patches/2152-xess-fxaa-gamma-barriers.patch`](../port/patches/2152-xess-fxaa-gamma-barriers.patch) | Restores the distinct FXAA and generalized gamma source barriers after the GPU/XeSS merge |
+| [`port/patches/2153-xess-jitter-diagnostics.patch`](../port/patches/2153-xess-jitter-diagnostics.patch) | Opt-in jitter experiments and per-frame draw-coverage tracing |
 | [`tools/release/stage_xess.py`](../tools/release/stage_xess.py) | Release-time validation and staging of Intel's unmodified runtime and required notices |
 | [`tools/smoke/test_xess.cpp`](../tools/smoke/test_xess.cpp) | Native D3D12 context, dispatch, mask and motion contents, readback, and fallback smoke test |
 | [`tools/smoke/test_xess_temporal.cpp`](../tools/smoke/test_xess_temporal.cpp) | Native check that XeSS reconstructs with the port's jitter and motion conventions |
@@ -312,12 +362,13 @@ Validation that needs no game data:
 - motion tests cover identity, rotation, depth-aware translation, FOV changes, and invalid projection data;
 - input tests cover deferred-pass selection, jitter eligibility, opaque resolve selection, capture coherence, aspect
   rounding, and the mip bias field;
+- diagnostic tests cover invalid settings, independent axes, default compatibility, phase/lag resets, and draw counts;
 - camera tests cover publication, resets, the flip ring, pairing, freshness, and pose handedness;
 - display tests cover parsing, `display.ini`, the options row, warning/cancel behavior, reset, and no unsupported
   sharpness control;
 - release tests cover exact hashes, AMD64 PE validation, required notices, payload assembly, portable ZIP inclusion,
   and launcher placement;
-- the native D3D12 smoke test dispatches 1280x720 to 1920x1080, reads back the mask and motion contents and a non-empty
+- the native D3D12 smoke test dispatches 1280x720 to 1920x1080 with normal and independent execute jitter, reads back the mask and motion contents and a non-empty
   output, and verifies near-16:9 re-init and missing, wrong, and unsupported-aspect fallback; and
 - the native temporal test feeds a moving scene for 64 frames and checks that the port's jitter and motion conventions
   reconstruct, that the NDC path matches pixel-unit motion, and that flipped axes do not.

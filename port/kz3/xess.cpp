@@ -1435,6 +1435,15 @@ extern "C" ID3D12Resource* kz3_xess_dispatch_camera(
             "XeSS-SR camera dispatch received invalid state or resources");
         return nullptr;
     }
+    const kz3_xess_jitter_offset execute_jitter =
+        kz3_xess_execute_jitter(desc);
+    if (!std::isfinite(desc->jitter_x) ||
+        !std::isfinite(desc->jitter_y) ||
+        !std::isfinite(execute_jitter.x) ||
+        !std::isfinite(execute_jitter.y)) {
+        set_status("XeSS-SR camera dispatch has invalid jitter offsets");
+        return nullptr;
+    }
     const uint32_t required_camera =
         KZ3_XESS_CAMERA_CURRENT_VALID |
         KZ3_XESS_CAMERA_PLANES_VALID;
@@ -1623,8 +1632,8 @@ extern "C" ID3D12Resource* kz3_xess_dispatch_camera(
     execute.responsive_pixel_mask_texture =
         g_xess.responsive_mask;
     execute.output_texture = g_xess.output;
-    execute.jitter_offset_x = desc->jitter_x;
-    execute.jitter_offset_y = desc->jitter_y;
+    execute.jitter_offset_x = execute_jitter.x;
+    execute.jitter_offset_y = execute_jitter.y;
     execute.exposure_scale = 1.0f;
     execute.reset_history =
         desc->reset ||

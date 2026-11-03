@@ -284,6 +284,9 @@ int main(int argc, char** argv)
     const bool expect_unsupported =
         argc == 2 &&
         strcmp(argv[1], "--expect-unsupported") == 0;
+    const bool jitter_override =
+        argc == 2 &&
+        strcmp(argv[1], "--jitter-override") == 0;
 
     {
         float pose[16] = {};
@@ -618,6 +621,11 @@ int main(int argc, char** argv)
         dispatch.output_height = output_height;
         dispatch.jitter_x = jitter_x;
         dispatch.jitter_y = jitter_y;
+        if (jitter_override) {
+            dispatch.use_execute_jitter_override = 1;
+            dispatch.execute_jitter_x = 0.25f;
+            dispatch.execute_jitter_y = -0.25f;
+        }
         dispatch.reset = 1;
         dispatch.use_responsive_mask = 1;
         dispatch.use_hud_mask = 1;
@@ -847,9 +855,10 @@ int main(int argc, char** argv)
     }
     printf(
         "[test_xess] XeSS-SR 2.0.2 depth-motion and responsive-mask "
-        "dispatch: ok (jitter %.6f, %.6f)\n",
+        "dispatch: ok (jitter %.6f, %.6f; execute override %s)\n",
         jitter_x,
-        jitter_y);
+        jitter_y,
+        jitter_override ? "on" : "off");
     result = 0;
 
 done:

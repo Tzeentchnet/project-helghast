@@ -33,6 +33,7 @@ gamma = between(
     "static ID3D12Resource* ld_gamma_present(u32 i)",
 )
 blit = between("static int ld_dm_blit(", "/* The movie path's guest-size")
+xess_present = between("static ID3D12Resource* ld_xess_present(", "static void ld_present_body(")
 spatial_gate = "if (!rsx_dm_spatial_upscaler_allowed(g_dm_filter)) {"
 spatial_else = "} else {   /* patch 2145:"
 gate_at = blit.find(spatial_gate)
@@ -45,6 +46,13 @@ checks = (
     ("gamma state", "b[nb].Transition.StateBefore = source_state;" in gamma),
     ("XeSS/FSR selection", 0 <= gate_at < else_at < evaluate_at),
     ("display sampler selection", "int dm_filter = rsx_dm_sample_filter(g_dm_filter);" in blit),
+    ("diagnostic draw accounting", "ld_xess_diagnostic_draw(&xess_draw," in text),
+    ("independent execute jitter", "dispatch.use_execute_jitter_override = 1;" in xess_present
+     and "dispatch.execute_jitter_x = g_xess_diagnostic_sample.execute_x;" in xess_present
+     and "dispatch.execute_jitter_y = g_xess_diagnostic_sample.execute_y;" in xess_present),
+    ("diagnostic FXAA isolation", "if (!ld_xess_skip_fxaa())" in text
+     and "g_xess_diagnostic_sample.active && kz3_xess_diagnostic_modified" in text),
+    ("fallback holds only projected jitter", "if (ld_xess_frame_jittered()) g_xess_jitter_hold = 1;" in xess_present),
 )
 bad = [name for name, ok in checks if not ok]
 if bad:

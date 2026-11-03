@@ -32,7 +32,25 @@ typedef struct kz3_xess_camera_dispatch_desc {
     uint32_t reset;
     uint32_t use_responsive_mask;
     uint32_t use_hud_mask;
+    float execute_jitter_x;
+    float execute_jitter_y;
+    uint32_t use_execute_jitter_override;
 } kz3_xess_camera_dispatch_desc;
+
+typedef struct kz3_xess_jitter_offset {
+    float x;
+    float y;
+} kz3_xess_jitter_offset;
+
+static inline kz3_xess_jitter_offset kz3_xess_execute_jitter(
+    const kz3_xess_camera_dispatch_desc* desc)
+{
+    const kz3_xess_jitter_offset result = {
+        desc->use_execute_jitter_override ? desc->execute_jitter_x : desc->jitter_x,
+        desc->use_execute_jitter_override ? desc->execute_jitter_y : desc->jitter_y
+    };
+    return result;
+}
 
 int kz3_xess_initialize(
     ID3D12Device* device,

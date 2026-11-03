@@ -122,6 +122,7 @@ tools/smoke/test_gpupass.sh
 tools/smoke/test_display_mode.sh
 tools/smoke/test_xess_motion.sh
 tools/smoke/test_xess_inputs.sh
+tools/smoke/test_xess_diagnostics.sh
 tools/smoke/test_xess_camera.sh
 tools/smoke/test_xess_compile.sh
 tools/spu/test_r97_mapper_window.sh

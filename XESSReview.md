@@ -562,9 +562,10 @@ jitter scale (it matches Intel's formula), and exposure (not related to position
 
 ### Experiments that would separate them
 
-Only experiments 1 and 2 need no new code. The rest are **proposed switches that do not exist yet** (the zero-jitter
-build was a temporary diagnostic). Each should log its setting once. Anything
-XeSS dumps must stay under `work/`, as `AGENTS.md` keeps game material out of the repository.
+Experiments 3-5, 7 and 9 now have opt-in controls and tracing described in
+[XeSS jitter diagnostics](docs/XESS.md#jitter-diagnostics). Experiments 6, 8, 10 and 11 still need additional code or
+capture tooling. The earlier zero-jitter build was a temporary diagnostic. Anything XeSS dumps must stay under `work/`,
+as `AGENTS.md` keeps game material out of the repository.
 
 | # | Experiment | Correct implementation gives | Implicates if not |
 |---|---|---|---|
@@ -572,9 +573,9 @@ XeSS dumps must stay under `work/`, as `AGENTS.md` keeps game material out of th
 | 2 | `KZ3_XESS_MIP_BIAS=0`, then `KZ3_XESS_CAMERA_LAG` as in the test plan | Calmer texture shimmer | C5 |
 | 3 | Projection jitter on, execute jitter zero, then the reverse | Both shake. A wobble that goes with only one of them points at that side | Which side is wrong |
 | 4 | **Two-phase jitter**: alternate `(+0.25, 0)` and `(-0.25, 0)` on the draw and the execute call, camera paused | Input frames differ by half an input pixel, output frames agree | Any remaining shake has a two-frame period, so it is easy to see and measure; its size gives the error in input pixels |
-| 5 | Execute-only jitter scale `+1/-1` per axis, using `xessSetJitterScale` | The existing signs give the steadiest result | C4, and which axis |
+| 5 | Execute-only jitter scale `+1/-1` per axis, by scaling the execute offsets | The existing signs give the steadiest result | C4, and which axis |
 | 6 | Velocity scale `0` with `xessSetVelocityScale`, then `+1/-1` | Paused scene: no change, because motion is already zero. Moving scene: zero scale is the worst case for ghosting but removes motion errors | C1 motion, if the jitter changes with the scale in a moving scene |
-| 7 | Dispatch jitter lagged by one frame, `KZ3_XESS_JITTER_LAG=1` | Worse | C3 if it improves things |
+| 7 | Dispatch jitter lagged by one frame, `KZ3_XESS_EXECUTE_JITTER_LAG=1` | Worse | C3 if it improves things |
 | 8 | Responsive mask forced to zero, as `KZ3_XESS_HUD_MASK=0` does for the HUD part | Little change | C1 (mask) if it improves things |
 | 9 | Coverage counters per frame: draws into the scene target and the deferred set, split into jittered, depth test off, other depth slot, viewport not full, other target | Nearly all draws jittered | C2, and which class |
 | 10 | Capture the pre-XeSS colour at two phases with the camera paused and cross-correlate | Whole-image shift equal to the phase difference, same sign on both axes | C2 (where it is not), C4 (sign) |

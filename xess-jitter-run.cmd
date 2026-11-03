@@ -2,6 +2,7 @@
 setlocal EnableExtensions DisableDelayedExpansion
 
 set "GAME_DIR=%~dp0build\kz3-win"
+if defined KZ3_XESS_BUILD_DIR for %%I in ("%KZ3_XESS_BUILD_DIR%") do set "GAME_DIR=%%~fI"
 set "GAME_EXE=%GAME_DIR%\kz3.exe"
 
 if not exist "%GAME_EXE%" (

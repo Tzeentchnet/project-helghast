@@ -66,6 +66,11 @@ if ($LASTEXITCODE -ne 0) {
     throw "XeSS smoke test failed"
 }
 
+& $Exe --jitter-override
+if ($LASTEXITCODE -ne 0) {
+    throw "XeSS independent execute jitter test failed"
+}
+
 & (Join-Path $Out "test_xess_temporal.exe")
 if ($LASTEXITCODE -ne 0) {
     throw "XeSS temporal test failed"
