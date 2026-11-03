@@ -38,6 +38,8 @@ $env:KZ3_DISPLAY_FILTER = "xess"
 XeSS-SR is attempted only when the output is larger than 1280x720 and has the same aspect ratio, allowing one output
 pixel of rounding (1366x768 and rounded Fit sizes pass; 1920x1200 does not). A 1920x1080 output is the primary test
 case. The runtime chooses a XeSS quality mode from the requested scale; there is no separate quality selector yet.
+When XeSS is selected, the independent `RSX_UPSCALE` spatial upscaler is bypassed, including when XeSS falls back to
+Bilinear. A requested spatial backend is reported in the log; selecting another display filter restores its usual use.
 
 Switches for one run, each read once at the point named:
 
@@ -93,9 +95,9 @@ Any missing, unsupported, or incoherent input
 | [`port/kz3/xess_camera.h`](../port/kz3/xess_camera.h) | Platform-independent camera bridge, flip pairing, and freshness rules |
 | [`port/kz3/xess_inputs.h`](../port/kz3/xess_inputs.h) | Pure deferred-pass, scene-resolve, jitter, capture-pair, aspect, and mip-bias rules |
 | [`port/kz3/main.cpp`](../port/kz3/main.cpp) | Camera, FOV, and projection-plane publication |
-| [`port/patches/2142-xess-super-resolution.patch`](../port/patches/2142-xess-super-resolution.patch) | Renderer integration, input selection, presentation ordering, UI, and fallback |
-| [`port/patches/2143-xess-review-fixes.patch`](../port/patches/2143-xess-review-fixes.patch) | Fixes from [the review](../XESSReview.md): FXAA, mip bias, camera pairing, failure reporting, HUD mask, re-init safety |
-| [`port/patches/2144-xess-fxaa-gamma-barriers.patch`](../port/patches/2144-xess-fxaa-gamma-barriers.patch) | Restores the distinct FXAA and generalized gamma source barriers after the GPU/XeSS merge |
+| [`port/patches/2150-xess-super-resolution.patch`](../port/patches/2150-xess-super-resolution.patch) | Renderer integration, input selection, presentation ordering, UI, and fallback |
+| [`port/patches/2151-xess-review-fixes.patch`](../port/patches/2151-xess-review-fixes.patch) | Fixes from [the review](../XESSReview.md): FXAA, mip bias, camera pairing, failure reporting, HUD mask, re-init safety |
+| [`port/patches/2152-xess-fxaa-gamma-barriers.patch`](../port/patches/2152-xess-fxaa-gamma-barriers.patch) | Restores the distinct FXAA and generalized gamma source barriers after the GPU/XeSS merge |
 | [`tools/release/stage_xess.py`](../tools/release/stage_xess.py) | Release-time validation and staging of Intel's unmodified runtime and required notices |
 | [`tools/smoke/test_xess.cpp`](../tools/smoke/test_xess.cpp) | Native D3D12 context, dispatch, mask and motion contents, readback, and fallback smoke test |
 | [`tools/smoke/test_xess_temporal.cpp`](../tools/smoke/test_xess_temporal.cpp) | Native check that XeSS reconstructs with the port's jitter and motion conventions |
@@ -320,7 +322,7 @@ Validation that needs no game data:
 - the native temporal test feeds a moving scene for 64 frames and checks that the port's jitter and motion conventions
   reconstruct, that the NDC path matches pixel-unit motion, and that flipped axes do not.
 
-The GPU-offload integration keeps patches 2139-2141 ahead of XeSS patches 2142-2144. On 2026-10-31, all 296 patches
+At the 2026-10-31 GPU-offload integration, patches 2139-2141 preceded XeSS patches 2142-2144. All 296 patches
 were present on the pinned ps3recomp commit, including the regenerated XeSS pair against that exact GPU-patched base
 and the follow-up barrier repair. The
 shared draw tail retains GPU-fetch submission accounting before query completion and performs XeSS scene captures
@@ -331,7 +333,9 @@ and runtime-fallback tests passed. Building the combined game exposed a misplace
 to the generalized gamma source, while the generalized gamma pass referred to the removed surface variable. Patch
 2144 restores each pass's own resource and state, and `test_xess_compile` checks both function bodies. The full native
 game target then built with Clang 23.1.3. A direct XeSS startup check selected the 1920x1080 Fit path and remained
-responsive; it was stopped before gameplay, so the gameplay evidence below still predates the GPU merge.
+responsive; it was stopped before gameplay, so the gameplay evidence below still predates the GPU merge. The v0.1.8
+integration renumbers the GPU patches to 2147-2149 and the XeSS patches to 2150-2152, after the upstream renderer
+patches; the older numbers in this dated record describe the build that was tested.
 
 Native Windows gameplay validation on 2026-10-31 used the hardware D3D12 path on an NVIDIA RTX 5070, a 1280x720
 game image, a 1920x1080 Fit output, and `KZ3_DISPLAY_FILTER=xess`. Before review-fix patch 2143, the log showed:

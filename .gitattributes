@@ -1,7 +1,9 @@
 # No global text/eol normalisation: several ps3recomp sources are CRLF and our patches carry that context byte for
 # byte (a global `text=auto eol=lf` made `git apply` reject them in CI).
 *.png binary
-*.patch -text linguist-generated=true
+# Patch context includes blank-line prefixes and preserved CRLF; checking it as source reports false positives.
+*.patch -text -whitespace linguist-generated=true
+*.cmd whitespace=cr-at-eol
 re/data/*.tsv linguist-generated=true
 licenses/Intel-XeSS-LICENSE.txt -text -whitespace
 licenses/Intel-XeSS-THIRD-PARTY-NOTICES.txt -text -whitespace

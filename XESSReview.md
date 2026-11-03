@@ -11,6 +11,9 @@ fix. See [Fix record](#fix-record) for what was done and [Follow-up](#follow-up-
 for the jitter analysis, further issues and future work. The findings below are kept as written, so their line
 references are to commit `2c4fa7a`.
 
+The v0.1.8 integration renumbered the GPU patches from 2139-2141 to 2147-2149 and the XeSS patches from
+2142-2144 to 2150-2152. Historical patch numbers and line references below describe the versions reviewed at the time.
+
 ## Verdict
 
 The integration is mechanically sound and safe as an opt-in experiment, but it should not merge as written.
@@ -35,7 +38,7 @@ Five items should be fixed before merge. All are small except F3.
 - **Read**: established from the code. The path is deterministic, but it was not observed in a game run.
 - **Inferred**: a likely consequence that still needs a run to confirm.
 
-Renderer references point into [patch 2142](port/patches/2142-xess-super-resolution.patch) where the code is new, and
+Renderer references point into [patch 2142, now 2150](port/patches/2150-xess-super-resolution.patch) where the code is new, and
 otherwise name the function in `libs/video/rsx_live_draw.c` of the patched toolkit.
 
 ## Must fix before merge
@@ -46,7 +49,7 @@ otherwise name the function in `libs/video/rsx_live_draw.c` of the patched toolk
 ([kz3_ppu_overrides.cpp:866](port/spu/kz3_ppu_overrides.cpp#L866), active on 1.14 through
 [ppu_overrides-114.txt:10](re/data/overrides/ppu_overrides-114.txt#L10)). The patch then calls `ld_host_aa(i)`
 unconditionally, straight after the pre-upscale capture
-([patch line 572](port/patches/2142-xess-super-resolution.patch#L572)).
+([patch line 572](port/patches/2150-xess-super-resolution.patch)).
 
 Every XeSS frame therefore gets a spatial edge filter on its jittered samples before the temporal solve. FXAA responds
 differently at each jitter phase, so it softens edges and adds frame-to-frame variation that XeSS has to treat as
@@ -71,7 +74,7 @@ level. `docs/XESS.md` does not list this.
 
 `kz3_xess_get_camera` returns the last coherent state however old it is
 ([xess.cpp:1262](port/kz3/xess.cpp#L1262)). The renderer's only check is
-`g_xess_camera_frame != g_ld_frames` ([patch line 641](port/patches/2142-xess-super-resolution.patch#L641)), which
+`g_xess_camera_frame != g_ld_frames` ([patch line 641](port/patches/2150-xess-super-resolution.patch)), which
 proves a snapshot was taken this frame, not that the snapshot is new. `camera.guest_flip` is never compared with
 anything. `docs/XESS.md` line 239 lists a stale camera as a fallback condition, but no such check exists.
 
@@ -98,7 +101,7 @@ Which of these occur in practice is unknown, because no log records the offset.
 `docs/XESS.md` says the renderer "logs the reason". For the main failure cases it logs the wrong one:
 
 1. `ld_xess_draw_jitter` calls `ld_xess_ensure_context` at the first deferred draw. On failure it returns with
-   `g_xess_camera_frame` still `UINT32_MAX` ([patch lines 330-361](port/patches/2142-xess-super-resolution.patch#L330)).
+   `g_xess_camera_frame` still `UINT32_MAX` ([patch lines 330-361](port/patches/2150-xess-super-resolution.patch)).
 2. `ld_xess_present` reaches the camera check first and reports
    `no coherent single-view camera and projection are available`.
 3. The `XESS_BYPASS_CONTEXT` branch that would print `kz3_xess_status()` is reachable only if the draw-time init worked
@@ -144,7 +147,7 @@ HUD. The known-issues list mentions only the HUD.
 
 The HUD is worse off than the docs suggest. Its pixels receive motion reconstructed from the depth behind them, so
 static text is reprojected as if it were world-locked. The responsive mask does not help, because its final capture
-happens at the NV0039 scene copy, before FXAA, post and HUD ([patch lines 536-573](port/patches/2142-xess-super-resolution.patch#L536)).
+happens at the NV0039 scene copy, before FXAA, post and HUD ([patch lines 536-573](port/patches/2150-xess-super-resolution.patch)).
 The phrase "immediately before temporal presentation" (XESS.md lines 57 and 160) is therefore inaccurate.
 
 **Fix, cheap step first:** patch 2113 already identifies the compose draw (`compose = first && g_h169_depth_seen`).
@@ -231,7 +234,7 @@ from that branch.
 | M1 | `ld_gamma_present_resource` sizes the shared `g_aa_tex` to the XeSS output while FXAA needs 1280x720 | With non-default Brightness it is recreated twice a frame (Measured: 1.2 ms). Fixing F1 removes it |
 | M2 | The depth SRV is rewritten in one heap slot every frame with two frames in flight ([xess.cpp:1452](port/kz3/xess.cpp#L1452)) | Benign while the resource is unchanged, but a D3D12 rule violation. Write it only when the resource changes |
 | M3 | Depth is resolved at present, not at the end of the scene | A later write to that zeta would feed XeSS the wrong depth. Whether the game does this needs a run |
-| M4 | A 250 ms hitch resets history ([patch line 682](port/patches/2142-xess-super-resolution.patch#L682)) | Game time is frame-locked, so a hitch does not invalidate history. `frame_ms` has no other use |
+| M4 | A 250 ms hitch resets history ([patch line 682](port/patches/2150-xess-super-resolution.patch)) | Game time is frame-locked, so a hitch does not invalidate history. `frame_ms` has no other use |
 | M5 | Jitter phases clamp to 64; Intel's rule gives 72 at 3x | Only reached near 4K output |
 | M6 | `xessIsOptimalDriver` goes only to stderr | Intel asks for a notice to the user |
 | M7 | The Native AA branch is unreachable | The renderer requires output larger than input |
@@ -362,7 +365,7 @@ an image-quality fix.
 
 ### What changed
 
-The renderer changes are in a new patch, [2143](port/patches/2143-xess-review-fixes.patch), because `AGENTS.md` asks for a
+The renderer changes are in a new patch, [2143, now 2151](port/patches/2151-xess-review-fixes.patch), because `AGENTS.md` asks for a
 new numbered patch and it can be dropped on its own terms: revert the commit as a whole, because the adapter API changed
 with it.
 
@@ -645,11 +648,11 @@ Completed during the subsequent PR-preparation pass:
 ### PR-preparation build follow-up
 
 The first full native build of the merged GPU/XeSS tip exposed a renderer compile failure. Patch
-[2142](port/patches/2142-xess-super-resolution.patch) had generalized the gamma input barrier, but its small barrier
+[2142, now 2150](port/patches/2150-xess-super-resolution.patch) had generalized the gamma input barrier, but its small barrier
 hunk matched the structurally identical FXAA block after the merge. FXAA therefore referred to undeclared
 `source`/`source_state` variables, while the gamma pass referred to the removed `sf` variable.
 
-[Patch 2144](port/patches/2144-xess-fxaa-gamma-barriers.patch) restores the FXAA surface transition and the gamma
+[Patch 2144, now 2152](port/patches/2152-xess-fxaa-gamma-barriers.patch) restores the FXAA surface transition and the gamma
 function's supplied source transition. `test_xess_compile` now checks the two barriers within their respective
 function bodies. The corrected 296-patch toolkit built the complete native game target with bundled Clang 23.1.3.
 The root `xess-jitter-run.cmd` then started that exact executable with the normal 1920x1080 Fit XeSS configuration;

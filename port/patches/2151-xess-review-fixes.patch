@@ -1,4 +1,4 @@
-KZ3 patch 2143 (ENHANCEMENT, experimental): fixes from the XeSS-SR review, on top of patch 2142. XESSReview.md at the
+KZ3 patch 2151 (ENHANCEMENT, experimental): fixes from the XeSS-SR review, on top of patch 2150. XESSReview.md at the
 repository root has the findings (F and M numbers below), the reasoning and the test plan.
 
 - F1: no FXAA on jittered frames. The pass sat between the jitter and the temporal solve.
@@ -23,14 +23,14 @@ The rules live in port/kz3/xess_camera.h and xess_inputs.h, with host tests in t
 test_xess_inputs.c. tools/smoke/test_xess.cpp checks the mask and motion contents on a real GPU. Non-KZ3 builds compile
 none of this. Written from Intel's public XeSS SDK 3.0.2 developer guide; no game code or Intel source.
 diff --git a/libs/video/rsx_live_draw.c b/libs/video/rsx_live_draw.c
-index 6ae80906c278a483645122f98995d609f173616d..eb588b6047bfe281881ffe36deb9b89832a1b7a0 100644
+index 9f6e410..e3b2fc3 100644
 --- a/libs/video/rsx_live_draw.c
 +++ b/libs/video/rsx_live_draw.c
-@@ -13723,6 +13723,43 @@ static kz3_xess_capture_key g_xess_opaque_capture;
+@@ -13815,6 +13815,43 @@ static kz3_xess_capture_key g_xess_opaque_capture;
  static u32 g_xess_responsive_frame = UINT32_MAX;
  static u32 g_xess_responsive_context_generation;
  static int ld_xess_draw_jitter(u32 frame, float* x, float* y);
-+/* KZ3 patch 2143: see the patch header. */
++/* KZ3 patch 2151: see the patch header. */
 +static u32 g_xess_context_failed_frame = UINT32_MAX;   /* the draw-time init of that frame failed: kz3_xess_status() says why */
 +static int g_xess_jitter_hold;                         /* a jittered frame fell back: no jitter until a dispatch works */
 +static u32 g_xess_depth_frame = UINT32_MAX;
@@ -70,12 +70,12 @@ index 6ae80906c278a483645122f98995d609f173616d..eb588b6047bfe281881ffe36deb9b898
  #endif
  static u32 g_h169_frame = 0xFFFFFFFFu;
  static int g_h169_depth_seen, g_h169_disp_seen, g_h169_rt_sampled;
-@@ -14732,6 +14769,41 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
+@@ -14852,6 +14889,41 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
          else
              g_ld_vtex_unsupported++;
      }
 +#if defined(KZ3_XESS)
-+    /* Patch 2143: decided here, not at xf below. The sampler table of this draw is built next, and a first-frame init
++    /* Patch 2151: decided here, not at xf below. The sampler table of this draw is built next, and a first-frame init
 +     * blocks, so it runs before any of this draw's state is recorded. */
 +    int xess_jitter = 0, xess_capture_opaque = 0;
 +    float xess_jx = 0.0f, xess_jy = 0.0f;
@@ -112,7 +112,7 @@ index 6ae80906c278a483645122f98995d609f173616d..eb588b6047bfe281881ffe36deb9b898
      LDW_ADD(RSX_PERF_W_D_TEXLOOP_T, texloop_t0);
      LDW_T0(desc_t0);   /* patch 2045 */
      const u32 required_srv_tables = 1u + (vtex_mask != 0);
-@@ -14870,7 +14942,7 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
+@@ -14990,7 +15062,7 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
      float h_kx = 1.0f, h_ky = 1.0f;
      int h169 = 0;
  #if defined(KZ3_XESS)
@@ -121,17 +121,17 @@ index 6ae80906c278a483645122f98995d609f173616d..eb588b6047bfe281881ffe36deb9b898
  #endif
      {
          const int full = vp.scale[0] == Wv * 0.5f && vp.translate[0] == Wv * 0.5f &&
-@@ -14881,6 +14953,9 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
+@@ -15001,6 +15073,9 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
          if (display) {
              const int first = !g_h169_disp_seen;
              g_h169_disp_seen = 1;
 +#if defined(KZ3_XESS)
-+            xess_compose = first && g_h169_depth_seen && full;   /* patch 2143: the frame before its HUD */
++            xess_compose = first && g_h169_depth_seen && full;   /* patch 2151: the frame before its HUD */
 +#endif
              if (ld_h169_factors(&h_kx, &h_ky)) {
                  const int compose = first && g_h169_depth_seen;
                  h169 = full && is169 && !compose && !g_h169_rt_sampled;
-@@ -14896,41 +14971,10 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
+@@ -15016,41 +15091,10 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
              }
          }
  #if defined(KZ3_XESS)
@@ -155,10 +155,7 @@ index 6ae80906c278a483645122f98995d609f173616d..eb588b6047bfe281881ffe36deb9b898
 -                &xess_draw, g.width, g.height)) {
 -            g_xess_zslot = current_zslot;
 -            g_xess_zframe = g_ld_frames;
-+        if (xess_jitter) {
-+            xf[4] += 2.0f * xess_jx / Wv;
-+            xf[5] -= 2.0f * xess_jy / Hv;
-         }
+-        }
 -        if (kz3_xess_should_jitter(
 -                &xess_draw,
 -                g.width,
@@ -170,13 +167,16 @@ index 6ae80906c278a483645122f98995d609f173616d..eb588b6047bfe281881ffe36deb9b898
 -                xf[4] += 2.0f * jx / Wv;
 -                xf[5] -= 2.0f * jy / Hv;
 -            }
--        }
++        if (xess_jitter) {
++            xf[4] += 2.0f * xess_jx / Wv;
++            xf[5] -= 2.0f * xess_jy / Hv;
+         }
 -        xess_capture_opaque = kz3_xess_is_opaque_resolve(
 -            &xess_draw, g.width, g.height);
  #endif
          {   /* patch 2118 diagnostics: KZ3_HUD_169_LOG=2 KZ3_HUD_169_LOGF=<frame>: every draw of 3 frames, any target */
              static int dl = -2; static u32 df = 0;
-@@ -15146,6 +15190,24 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
+@@ -15266,6 +15310,24 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
                      "surface 0x%08X\n",
                      g_ld_frames, g.surfaces[target].offset);
      }
@@ -201,7 +201,7 @@ index 6ae80906c278a483645122f98995d609f173616d..eb588b6047bfe281881ffe36deb9b898
  #endif
      if (g_gt.on > 0) ld_gt_draw(target, n_mrt, mrt, current_zslot, n_tri, sf.clip_w * sf.clip_h, (u32)__builtin_popcount(texture_mask));   /* patch 2052 */
      LDW_ADD(RSX_PERF_W_D_REC_T, rec_t0);
-@@ -15963,12 +16025,29 @@ static void ld_xess_output_size(u32 requested_w, u32 requested_h, u32* w, u32* h
+@@ -16100,12 +16162,29 @@ static void ld_xess_output_size(u32 requested_w, u32 requested_h, u32* w, u32* h
      *h = requested_h < max_h ? requested_h : max_h;
  }
  
@@ -234,7 +234,7 @@ index 6ae80906c278a483645122f98995d609f173616d..eb588b6047bfe281881ffe36deb9b898
      if (!kz3_xess_initialize(
              g.dev, g.width, g.height, output_w, output_h)) {
          g_xess_context_w = g_xess_context_h = 0;
-@@ -15978,6 +16057,45 @@ static int ld_xess_ensure_context(u32 output_w, u32 output_h)
+@@ -16115,6 +16194,45 @@ static int ld_xess_ensure_context(u32 output_w, u32 output_h)
          g_xess_context_w = output_w;
          g_xess_context_h = output_h;
          g_xess_context_generation++;
@@ -245,7 +245,7 @@ index 6ae80906c278a483645122f98995d609f173616d..eb588b6047bfe281881ffe36deb9b898
 +}
 +
 +/* KZ3_XESS_CAMERA_LAG: whole flips to step back from the paired camera, one run (default 0). Negative = take the latest
-+ * published camera, the behaviour before patch 2143. */
++ * published camera, the behaviour before patch 2151. */
 +static int ld_xess_camera_lag(void)
 +{
 +    static int lag = 0, read = 0;
@@ -280,7 +280,7 @@ index 6ae80906c278a483645122f98995d609f173616d..eb588b6047bfe281881ffe36deb9b898
      }
      return 1;
  }
-@@ -15996,12 +16114,19 @@ static int ld_xess_draw_jitter(u32 frame, float* x, float* y)
+@@ -16133,12 +16251,19 @@ static int ld_xess_draw_jitter(u32 frame, float* x, float* y)
              ld_dm_scaling_now(), RSX_DM_BILINEAR);
          u32 output_w, output_h;
          ld_xess_output_size((u32)output.w, (u32)output.h, &output_w, &output_h);
@@ -303,7 +303,7 @@ index 6ae80906c278a483645122f98995d609f173616d..eb588b6047bfe281881ffe36deb9b898
              !kz3_xess_get_jitter(
                  frame, g.width, output_w,
                  &g_xess_jitter_x, &g_xess_jitter_y)) {
-@@ -16014,6 +16139,45 @@ static int ld_xess_draw_jitter(u32 frame, float* x, float* y)
+@@ -16151,6 +16276,45 @@ static int ld_xess_draw_jitter(u32 frame, float* x, float* y)
      *y = g_xess_jitter_y;
      return g_xess_jitter_x != 0.0f || g_xess_jitter_y != 0.0f;
  }
@@ -349,7 +349,7 @@ index 6ae80906c278a483645122f98995d609f173616d..eb588b6047bfe281881ffe36deb9b898
  #endif
  /* patch 2113: KZ3_HUD_169 (=0 off, else on; one run) over display.ini hud_169 (rsx_live_draw_set_hud169; default on).
   * Active only while the present stretches the buffer to a client that is not 16:9: KZ3_ASPECT=screen and Stretch now
-@@ -18185,6 +18349,18 @@ u32 rsx_live_draw_writeback_range(u32 location, u32 offset, u32 size)
+@@ -18354,6 +18518,18 @@ u32 rsx_live_draw_writeback_range(u32 location, u32 offset, u32 size)
                                  g_ld_frames);
                  }
              }
@@ -363,12 +363,12 @@ index 6ae80906c278a483645122f98995d609f173616d..eb588b6047bfe281881ffe36deb9b898
 +                    g.width,
 +                    g.height))
 +                ld_xess_capture_depth();
-+            /* Patch 2143: no spatial AA on jittered samples; XeSS is the frame's anti-aliasing. */
++            /* Patch 2151: no spatial AA on jittered samples; XeSS is the frame's anti-aliasing. */
 +            if (!ld_xess_frame_jittered())
  #endif
              ld_host_aa(i);
          }
-@@ -18379,6 +18555,11 @@ static ID3D12Resource* ld_xess_present(
+@@ -18548,6 +18724,11 @@ static ID3D12Resource* ld_xess_present(
      const char* detail = NULL;
      if (g_dm_filter != RSX_DM_XESS) {
          g_xess_last_dispatch_frame = UINT32_MAX;
@@ -380,7 +380,7 @@ index 6ae80906c278a483645122f98995d609f173616d..eb588b6047bfe281881ffe36deb9b898
          return NULL;
      }
  
-@@ -18401,6 +18582,11 @@ static ID3D12Resource* ld_xess_present(
+@@ -18570,6 +18751,11 @@ static ID3D12Resource* ld_xess_present(
          detail = "the scanout color is not the primary RGBA8 render image";
          goto bypass;
      }
@@ -392,7 +392,7 @@ index 6ae80906c278a483645122f98995d609f173616d..eb588b6047bfe281881ffe36deb9b898
      if (g_xess_zframe != g_ld_frames ||
          !g_xess_zslot ||
          g_xess_zslot > g.n_zdepths) {
-@@ -18410,16 +18596,7 @@ static ID3D12Resource* ld_xess_present(
+@@ -18579,16 +18765,7 @@ static ID3D12Resource* ld_xess_present(
      }
  
      {
@@ -409,7 +409,7 @@ index 6ae80906c278a483645122f98995d609f173616d..eb588b6047bfe281881ffe36deb9b898
          if (g_xess_camera_frame != g_ld_frames ||
              !(camera.flags & KZ3_XESS_CAMERA_PLANES_VALID) ||
              (camera.flags & KZ3_XESS_CAMERA_MULTIPLE_VIEWS)) {
-@@ -18427,51 +18604,42 @@ static ID3D12Resource* ld_xess_present(
+@@ -18596,51 +18773,42 @@ static ID3D12Resource* ld_xess_present(
              detail = "no coherent single-view camera and projection are available";
              goto bypass;
          }
@@ -424,8 +424,12 @@ index 6ae80906c278a483645122f98995d609f173616d..eb588b6047bfe281881ffe36deb9b898
 +            detail = "the primary depth snapshot is unavailable or mismatched";
 +            goto bypass;
 +        }
-+
-+        /* Patch 2143: the camera must have moved on by one flip since the last dispatch. The same flip again means no
+ 
+-        D3D12_RESOURCE_BARRIER inputs[2] = {0};
+-        inputs[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+-        inputs[0].Transition.pResource = surface->tex;
+-        inputs[0].Transition.Subresource =
++        /* Patch 2151: the camera must have moved on by one flip since the last dispatch. The same flip again means no
 +         * camera motion, whatever delta that state carries; a skipped flip means the history no longer lines up. */
 +        const enum kz3_xess_camera_step step = kz3_xess_camera_step_from(
 +            g_xess_have_last_camera, g_xess_last_camera_flip, camera.guest_flip);
@@ -435,11 +439,7 @@ index 6ae80906c278a483645122f98995d609f173616d..eb588b6047bfe281881ffe36deb9b898
 +        } else if (step == KZ3_XESS_CAMERA_STEP_JUMP) {
 +            g_xess_camera_jumps++;
 +        }
- 
--        D3D12_RESOURCE_BARRIER inputs[2] = {0};
--        inputs[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
--        inputs[0].Transition.pResource = surface->tex;
--        inputs[0].Transition.Subresource =
++
 +        D3D12_RESOURCE_BARRIER input = {0};
 +        input.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
 +        input.Transition.pResource = surface->tex;
@@ -485,7 +485,7 @@ index 6ae80906c278a483645122f98995d609f173616d..eb588b6047bfe281881ffe36deb9b898
          dispatch.camera = camera;
          dispatch.render_width = surface->w;
          dispatch.render_height = surface->h;
-@@ -18485,8 +18653,13 @@ static ID3D12Resource* ld_xess_present(
+@@ -18654,8 +18822,13 @@ static ID3D12Resource* ld_xess_present(
              g_xess_responsive_frame == g_ld_frames &&
              g_xess_responsive_context_generation ==
                  g_xess_context_generation;
@@ -500,7 +500,7 @@ index 6ae80906c278a483645122f98995d609f173616d..eb588b6047bfe281881ffe36deb9b898
              g_xess_last_dispatch_frame == UINT32_MAX ||
              g_ld_frames != g_xess_last_dispatch_frame + 1u ||
              g_xess_context_generation !=
-@@ -18494,16 +18667,11 @@ static ID3D12Resource* ld_xess_present(
+@@ -18663,16 +18836,11 @@ static ID3D12Resource* ld_xess_present(
          ID3D12Resource* result = kz3_xess_dispatch_camera(&dispatch);
          LD_SM_INVALIDATE();
  
@@ -520,7 +520,7 @@ index 6ae80906c278a483645122f98995d609f173616d..eb588b6047bfe281881ffe36deb9b898
          if (!result) {
              reason = XESS_BYPASS_DISPATCH;
              detail = kz3_xess_status();
-@@ -18515,15 +18683,20 @@ static ID3D12Resource* ld_xess_present(
+@@ -18684,15 +18852,20 @@ static ID3D12Resource* ld_xess_present(
          g_xess_last_dispatch_frame = g_ld_frames;
          g_xess_last_dispatch_context_generation =
              g_xess_context_generation;
@@ -543,7 +543,7 @@ index 6ae80906c278a483645122f98995d609f173616d..eb588b6047bfe281881ffe36deb9b898
                      dispatch.jitter_x, dispatch.jitter_y,
                      dispatch.reset ||
                          (camera.flags & KZ3_XESS_CAMERA_RESET));
-@@ -18532,6 +18705,8 @@ static ID3D12Resource* ld_xess_present(
+@@ -18701,6 +18874,8 @@ static ID3D12Resource* ld_xess_present(
  
  bypass:
      g_xess_last_dispatch_frame = UINT32_MAX;
@@ -552,7 +552,7 @@ index 6ae80906c278a483645122f98995d609f173616d..eb588b6047bfe281881ffe36deb9b898
      if (reason != last_reason) {
          last_reason = reason;
          fprintf(stderr,
-@@ -19791,15 +19966,7 @@ void rsx_live_draw_shutdown(void)
+@@ -19960,15 +20135,7 @@ void rsx_live_draw_shutdown(void)
  {
      if (!g.ready) {
  #if defined(KZ3_XESS)
@@ -569,7 +569,7 @@ index 6ae80906c278a483645122f98995d609f173616d..eb588b6047bfe281881ffe36deb9b898
  #endif
          return;
      }
-@@ -19810,15 +19977,7 @@ void rsx_live_draw_shutdown(void)
+@@ -19979,15 +20146,7 @@ void rsx_live_draw_shutdown(void)
      ld_flush(LD_FLUSH_SHUTDOWN);
      ld_wb_gpu_shutdown();
  #if defined(KZ3_XESS)

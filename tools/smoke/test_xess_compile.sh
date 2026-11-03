@@ -32,15 +32,23 @@ gamma = between(
     "static ID3D12Resource* ld_gamma_present_resource(",
     "static ID3D12Resource* ld_gamma_present(u32 i)",
 )
+blit = between("static int ld_dm_blit(", "/* The movie path's guest-size")
+spatial_gate = "if (!rsx_dm_spatial_upscaler_allowed(g_dm_filter)) {"
+spatial_else = "} else {   /* patch 2145:"
+gate_at = blit.find(spatial_gate)
+else_at = blit.find(spatial_else, gate_at) if gate_at >= 0 else -1
+evaluate_at = blit.find("rsx_upscale_evaluate(", else_at) if else_at >= 0 else -1
 checks = (
     ("FXAA source", "b[nb].Transition.pResource = sf->tex;" in fxaa),
     ("FXAA state", "b[nb].Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;" in fxaa),
     ("gamma source", "b[nb].Transition.pResource = source;" in gamma),
     ("gamma state", "b[nb].Transition.StateBefore = source_state;" in gamma),
+    ("XeSS/FSR selection", 0 <= gate_at < else_at < evaluate_at),
+    ("display sampler selection", "int dm_filter = rsx_dm_sample_filter(g_dm_filter);" in blit),
 )
 bad = [name for name, ok in checks if not ok]
 if bad:
-    print("[test_xess_compile] FAIL: wrong input barrier in " + ", ".join(bad), file=sys.stderr)
+    print("[test_xess_compile] FAIL: renderer integration mismatch: " + ", ".join(bad), file=sys.stderr)
     raise SystemExit(1)
 PY
 fi

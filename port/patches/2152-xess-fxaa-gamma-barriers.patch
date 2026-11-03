@@ -1,6 +1,6 @@
-KZ3 patch 2144 (ENHANCEMENT, experimental): restore the FXAA and gamma input barriers after the XeSS/GPU merge.
+KZ3 patch 2152 (ENHANCEMENT, experimental): restore the FXAA and gamma input barriers after the XeSS/GPU merge.
 
-Patch 2142 generalized the gamma pass to accept an arbitrary source resource and state. Its barrier hunk matched the
+Patch 2150 generalized the gamma pass to accept an arbitrary source resource and state. Its barrier hunk matched the
 structurally identical block in ld_host_aa instead, leaving the FXAA function with undeclared source/source_state
 identifiers and the generalized gamma function with the removed sf identifier. Keep FXAA on its surface render target
 and transition the gamma function's supplied source from its supplied state.

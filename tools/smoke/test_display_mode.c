@@ -143,6 +143,14 @@ static void test_scaling(void)
               rsx_dm_parse_filter("fsr") < 0 &&
               rsx_dm_parse_scaling(NULL) < 0,
           "scaling/filter names");
+    CHECK(rsx_dm_spatial_upscaler_allowed(RSX_DM_BILINEAR) &&
+              rsx_dm_spatial_upscaler_allowed(RSX_DM_NEAREST) &&
+              !rsx_dm_spatial_upscaler_allowed(RSX_DM_XESS),
+          "XeSS selection bypasses spatial upscalers, including on fallback");
+    CHECK(rsx_dm_sample_filter(RSX_DM_BILINEAR) == RSX_DM_BILINEAR &&
+              rsx_dm_sample_filter(RSX_DM_NEAREST) == RSX_DM_NEAREST &&
+              rsx_dm_sample_filter(RSX_DM_XESS) == RSX_DM_BILINEAR,
+          "XeSS presentation uses the bilinear sampler without indexing past the two display pipelines");
     CHECK(rect_is(rsx_dm_rect_for(1280, 720, 1920, 1200, RSX_DM_STRETCH, RSX_DM_BILINEAR), 0, 0, 1920, 1200),
           "stretch: whole client");
     CHECK(rect_is(rsx_dm_rect_for(1280, 720, 1920, 1200, RSX_DM_FIT, RSX_DM_BILINEAR), 0, 60, 1920, 1080),
