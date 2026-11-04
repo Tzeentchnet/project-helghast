@@ -36,6 +36,8 @@ Where each feature of the PS3 game stands today, and the port-only features with
   whole-scene jitter; a zero-jitter diagnostic is stable but does not isolate the cause. History use, motion and
   camera pairing, jitter phase/sign, and draw coverage are the current blocker before broader image-quality and
   hardware testing, object motion, and UI separation
+- 🔧 Renderer image stability: severe surface corruption appeared in initial gameplay with both XeSS and Bilinear,
+  but did not recur in later comparisons. The trigger is not yet isolated
 - 📋 Broader temporal anti-aliasing and upscaling work (TAA, DLAA, DLSS, FSR) after the experimental XeSS path and
   Windows renderer are validated
 - 📋 Ray-traced sun shadows, then ambient occlusion and reflections (off by default)

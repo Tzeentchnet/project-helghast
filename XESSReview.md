@@ -5,11 +5,12 @@ renderer code around it, the release tooling and Intel's SDK 3.0.2 headers and d
 and a black-box probe on an RTX 5070 (driver 617.42). The game was not run, so in-game behaviour here comes from
 reading the code. No code was changed by the review itself.
 
-**Status (updated 2026-10-31):** the fixes were made and the game was run once with them. That run found and fixed a
-camera-pairing bug, but a constant small whole-scene jitter remains, so the branch is not ready as an image-quality
-fix. See [Fix record](#fix-record) for what was done and [Follow-up](#follow-up-whole-scene-jitter-further-issues-and-future-work)
-for the jitter analysis, further issues and future work. The findings below are kept as written, so their line
-references are to commit `2c4fa7a`.
+**Status (updated 2026-11-03):** the fixes were made, the camera-pairing bug was corrected, and the v0.1.8-integrated
+build was exercised in gameplay. Whole-scene XeSS jitter remains. Severe surface corruption was also observed with
+both XeSS and Bilinear but did not recur in later runs; its trigger is unknown. The branch is not ready as an
+image-quality fix. See [Fix record](#fix-record), [Follow-up](#follow-up-whole-scene-jitter-further-issues-and-future-work)
+and [Post-merge gameplay findings](#post-merge-gameplay-findings). The original findings below are kept as written, so
+their line references are to commit `2c4fa7a`.
 
 The v0.1.8 integration renumbered the GPU patches from 2139-2141 to 2147-2149 and the XeSS patches from
 2142-2144 to 2150-2152. Historical patch numbers and line references below describe the versions reviewed at the time.
@@ -611,14 +612,13 @@ Ordered by what unblocks what.
 
 1. **Find the cause of the jitter** with experiments 1, 3, 4, 5 and 9 above. They are small, and between them they decide
    among C1 to C4. Do experiment 1 first, since it costs no code.
-2. **Add the debug switches and the one-line frame summary** (N5), then keep them. They are cheap, and every later
-   image-quality question will need them.
+2. **Keep the added debug switches and one-line frame summary** (N5). They are cheap, and every later image-quality
+   question will need them.
 3. **Fix what the experiments show.** Probable shapes: extend jitter to the missed draw classes (C2); move or lag the
    jitter used for dispatch to the phase the image really carries (C3); correct an axis (C4); repair motion or pairing
    (C1).
-4. **Rerun gameplay on the merged branch** before anything else is concluded (N7), including the log checks and
-   the picture table in *Gameplay result and remaining test plan*, and the pause test. The full native target now
-   builds and starts, but the post-merge picture has not yet been observed.
+4. **Extend the merged-branch gameplay checks** (N7): the native build and paused scene have now been observed, but
+   the full picture table, intermittent surface corruption, other scenes, and broader hardware remain unverified.
 5. **Replace camera-only motion** with per-object and skeletal motion (XESS.md future work 2). Until then, moving
    characters ghost whatever else is fixed.
 6. **Move XeSS earlier**: capture before tone-mapping and the HUD (F6) and draw the HUD afterwards at output
@@ -657,5 +657,43 @@ hunk matched the structurally identical FXAA block after the merge. FXAA therefo
 function's supplied source transition. `test_xess_compile` now checks the two barriers within their respective
 function bodies. The corrected 296-patch toolkit built the complete native game target with bundled Clang 23.1.3.
 The root `xess-jitter-run.cmd` then started that exact executable with the normal 1920x1080 Fit XeSS configuration;
-the process remained responsive and the startup log selected XeSS. It was stopped before gameplay, so this verifies
-the build and launch path only. The pause observation and all post-merge picture evidence remain outstanding.
+the process remained responsive and the startup log selected XeSS. It was stopped before gameplay, so that run
+verified the build and launch path only. The later post-merge gameplay evidence follows.
+
+### Post-merge gameplay findings
+
+On 2026-11-03 the v0.1.8-integrated diagnostic build ran natively at 1280x720 input and 1920x1080 output on an
+RTX 5070. Optional GPU vertex offload was disabled. The comparison builds used the same game inputs and effective
+cache paths; the exact source revision of the older build is not verified.
+
+**Surface corruption.** Severe corruption appeared in initial runs of the new build with XeSS and, in a separately
+started run, Bilinear. The older build did not show it with Bilinear in the compared scene. Later new-build runs
+were clean with `LD_NV3089_ROWS=0`, `1`, and `2`; switching the last run from Bilinear to XeSS also remained clean.
+The host row-copy equivalence test passed. The first clean run suggested a row-copy regression, but the clean
+`2` rerun did not confirm it. The corruption is not currently reproducible, and neither a XeSS-only cause nor a
+row-copy cause has been established. Do not treat either filter as proven free of it.
+
+**Jitter.** Normal XeSS visibly jittered in the paused scene; Bilinear did not. With horizontal two-phase jitter the
+movement looked horizontal and about as noticeable as normal XeSS. Reversing only the horizontal execute offset
+looked calmer, and restoring the original sign looked worse again. For this symmetric two-phase pattern, inversion
+and a one-frame phase lag are equivalent except at resets or gaps, so that comparison cannot distinguish them.
+
+Three horizontal-only Halton runs then compared the original execute offset, its inverted sign, and a one-frame
+execute lag. The observer reported less jitter with inversion and lag than with the original, but was unsure
+whether inversion or lag looked better. The trace confirmed that lag was applied on most sampled successful frames.
+For each run, 120 desktop samples of the same selected 320x192 window region were analyzed in memory at about
+40 samples per second; no frames were saved. Approximate 95th-percentile horizontal shifts between consecutive
+samples were:
+
+| Halton diagnostic | Estimated shift |
+|---|---:|
+| Original execute offset | 0.84 output px |
+| Inverted horizontal execute offset | 0.36 output px |
+| One-frame execute lag | 0.17 output px |
+
+These are single short samples, not synchronized GPU-frame measurements. Region content, animation or overlays,
+desktop sampling cadence, and the displacement estimator can bias them; they do not certify the `<0.1`
+output-pixel target or prove that the input color is one frame late. The diagnostics deliberately make the execute
+offset differ from the projection while depth and motion remain on their existing paths. Do not enable either
+change by default on this evidence. Next compare the pre-XeSS color phase and scene coverage with the projection,
+depth, and camera for the same frames, then validate any coherent fix in static and moving scenes.

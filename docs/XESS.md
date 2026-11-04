@@ -415,12 +415,24 @@ pairing, projection/execute phase and sign, and draw coverage all remain candida
 performance, hardware, level, and Proton validation waits on that correction. See the measured record and ranked
 hypotheses in [the review follow-up](../XESSReview.md#follow-up-whole-scene-jitter-further-issues-and-future-work).
 
+On the v0.1.8-integrated diagnostic build, normal XeSS still visibly jittered while Bilinear did not. In a paused,
+horizontal-only experiment, reversing the XeSS execute offset or lagging it by one frame looked calmer than the
+original setting. Limited in-memory desktop samples favored the lagged setting, but cannot establish the phase of
+the color input or the `<0.1` output-pixel stability target. These controls deliberately decouple XeSS execute
+from the projection and are diagnostics, not fixes. See the
+[post-merge gameplay findings](../XESSReview.md#post-merge-gameplay-findings).
+
 ## Known issues
 
 - Normal XeSS jitter currently produces a constant small whole-scene visual jitter in native gameplay. A temporary
-  zero-jitter diagnostic removes it, but that mode needs no temporal accumulation and does not isolate the cause.
+  zero-jitter diagnostic removes it, but that mode gives up temporal sample placement and does not isolate the cause.
   History use, motion and camera pairing, projection/execute phase and sign, masks, and coverage of jittered scene
   draws need to be measured together. See the [review follow-up](../XESSReview.md#follow-up-whole-scene-jitter-further-issues-and-future-work).
+- Severe scene-surface corruption was observed in initial gameplay runs with both XeSS and Bilinear. It was absent
+  in an older build and did not recur in later runs of the new build, including with the suspected row-copy modes
+  disabled or enabled. The trigger and its relationship to the branch are not established; neither XeSS nor the
+  row-copy optimization has been confirmed as the cause. See the
+  [post-merge gameplay findings](../XESSReview.md#post-merge-gameplay-findings).
 - Motion is camera-only. Moving characters, weapons, particles, vegetation, and shader animation can ghost or
   shimmer.
 - XeSS runs after tone-mapping, the SPU post chain (including motion blur) and the HUD, on display-referred color.
@@ -440,7 +452,8 @@ hypotheses in [the review follow-up](../XESSReview.md#follow-up-whole-scene-jitt
 
 1. Use the pause, two-phase, per-axis scale, phase-lag, and draw-coverage experiments in the
    [review follow-up](../XESSReview.md#experiments-that-would-separate-them) to determine whether history use, motion,
-   jitter phase/sign, or missed draws cause the whole-scene jitter.
+   jitter phase/sign, or missed draws cause the whole-scene jitter. Compare the pre-XeSS color phase with the
+   corresponding projection, depth, and camera before changing the default phase.
 2. Publish coherent per-object and skeletal transforms and generate object motion vectors.
 3. Separate scene and UI composition so the HUD can be drawn after temporal upscaling.
 4. Replace the difference mask with semantic transparency/reactive information where the renderer exposes it.
