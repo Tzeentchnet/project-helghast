@@ -987,12 +987,12 @@ def supervise():
     failure = None
     parent_gone = threading.Event()
     stage = "input"
+    raw_input = b""
     try:
         if os.name != "nt":
             fail("windows_required")
-        line = sys.stdin.readline()
-        if line.startswith("\ufeff"):
-            line = line[1:]
+        raw_input = sys.stdin.buffer.readline()
+        line = raw_input.decode("utf-8-sig")
         spec = json.loads(line)
         stage = "log_path"
         log = Path(spec["log"])
@@ -1068,7 +1068,10 @@ def supervise():
     except BenchmarkError as e:
         failure = str(e)
     except Exception as e:
-        failure = f"process_supervisor_{stage}_{type(e).__name__.lower()}"
+        if stage == "input" and isinstance(e, json.JSONDecodeError):
+            failure = f"process_supervisor_input_json_{e.pos}_{raw_input[:8].hex()}"
+        else:
+            failure = f"process_supervisor_{stage}_{type(e).__name__.lower()}"
     finally:
         if process is not None:
             try:
