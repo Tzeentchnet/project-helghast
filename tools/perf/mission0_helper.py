@@ -986,20 +986,24 @@ def supervise():
     process = None
     failure = None
     parent_gone = threading.Event()
+    stage = "input"
     try:
         if os.name != "nt":
             fail("windows_required")
         spec = json.loads(sys.stdin.readline())
+        stage = "log_path"
         log = Path(spec["log"])
         work = (REPO / "work" / "helsari-p0").resolve()
         if not _under(log.resolve(), work) or not log.parent.is_dir():
             fail("log_destination_invalid")
         _no_link_ancestors(log.parent)
+        stage = "limits"
         duration, grace = float(spec["duration_seconds"]), float(spec["grace_seconds"])
         if not (math.isfinite(duration) and math.isfinite(grace) and 0 < duration <= 3600 and 0 < grace <= 60):
             fail("process_timeout_invalid")
         if spec["close_mode"] not in ("window", "stdin"):
             fail("process_close_invalid")
+        stage = "open_log"
         try:
             output = log.open("xb", buffering=0)
         except FileExistsError:
@@ -1007,15 +1011,19 @@ def supervise():
         except OSError:
             fail("log_destination_invalid")
         with output:
+            stage = "start_process"
             try:
                 process = subprocess.Popen(spec["command_line"], executable=spec["executable"], cwd=spec["cwd"],
                                            env=spec["environment"], stdin=subprocess.PIPE, stdout=output,
                                            stderr=subprocess.STDOUT)
             except Exception:
                 fail("process_start_failed")
+            stage = "creation_time"
             created = _process_creation_filetime(process.pid)
+            stage = "started_event"
             print(json.dumps({"event": "started", "pid": process.pid, "created_filetime": created},
                              separators=(",", ":")), flush=True)
+            stage = "monitor"
 
             def watch_parent():
                 try:
@@ -1056,8 +1064,8 @@ def supervise():
                 fail("process_crashed")
     except BenchmarkError as e:
         failure = str(e)
-    except Exception:
-        failure = "process_supervisor_failed"
+    except Exception as e:
+        failure = f"process_supervisor_{stage}_{type(e).__name__.lower()}"
     finally:
         if process is not None:
             try:
