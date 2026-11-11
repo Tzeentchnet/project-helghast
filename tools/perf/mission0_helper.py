@@ -990,7 +990,10 @@ def supervise():
     try:
         if os.name != "nt":
             fail("windows_required")
-        spec = json.loads(sys.stdin.readline())
+        line = sys.stdin.readline()
+        if line.startswith("\ufeff"):
+            line = line[1:]
+        spec = json.loads(line)
         stage = "log_path"
         log = Path(spec["log"])
         work = (REPO / "work" / "helsari-p0").resolve()
